@@ -94,9 +94,21 @@ Web first, so it can be shared as a link.
   profiles; a state built at another draw anchor, or one with no trips to wait for (`noTrips`), is
   taken at once. **Previews go before an edit's follow-up** [T-1407]: after applying an edit the
   worker answers the track previews and station checks asked meanwhile, then builds and posts its
-  state, trips and boarding hour and answers it (`later` in the clock worker; any other message, or
-  trips sent from a timer, runs the follow-up first, so nothing else sees the model ahead of its
-  state). The track tool's blueprint segment that changes no line for demand asks `early`: it is
+  state, trips and boarding hour and answers it (`later` in the clock worker). A full state is built
+  a piece a task outside the message queue, about 0.1 s each on the biggest saves (`stateSteps`,
+  `networkSteps`: the rows, the network in a few pieces, then its post with the trips, never split),
+  previews answered between them; any other message, trips sent from a timer, or a full state sent
+  when fetched ground or streets reprice the blueprint, runs what is left first (for that state, begun
+  again on the new model; a held one stays held), so nothing else sees the model ahead of its state and
+  an edit's answer comes with the first world holding it (the page splits a paid edit's charge by it). **An edit goes ahead** [T-3803]: one of
+  the main path that changes no service, coming before or between the pieces of a follow-up that
+  builds the network (`goesAhead`, `standAside`). An edit in that follow-up still waiting for a world
+  holding it (its answer, or the page's split of an early answer's money) gets the rows built so far,
+  or new ones, as a rows state and then its answer; the rest of the follow-up joins the new edit's
+  (one state for both, not held), or goes on its own when the new edit makes none. An edit 5 s or more after a
+  follow-up's first edit neither joins it nor goes ahead, so its state still comes at least that often. The network cache
+  is written only at the end of a build, so one dropped part way leaves it as the last finished build
+  did. The track tool's blueprint segment that changes no line for demand asks `early`: it is
   answered before its state, the tool asks the next ghost from the answer's node, and the ghost
   just placed is drawn as the stand-in for the new blueprint until the next network is set
   (`Renderer.keepPreviewAsPlaced`). **Its state waits for the pointer to rest** [T-2404]: the
@@ -120,8 +132,9 @@ Web first, so it can be shared as a link.
   stop click has been answered for 500 ms (the panels ask a dozen after each world). The clicked marker is drawn
   in its new tier at the click (`StopMarkers.guessClick`, settled when the edit is answered) and a rows world
   rebuilds no demand layers (`worldIsRows`) [T-3159]. **A name edit's rows go first too** (`nameOnly`: a station,
-  complex or line renamed, a station bound): rows, then the answer, then the full state at once, unheld and with no
-  trips, since the network drawn has no names and no train's run changed [T-3793]. The clicks wait in the page in order (`queueStopEdit` in
+  complex or line renamed, a station bound): rows, then the answer, then a state at once, unheld, with no trips and
+  the renderer's network left as it is (a train count's kind, the schematic's graph sent again for its names), since
+  the network drawn has no names and no train's run changed [T-3793, T-3803]. The clicks wait in the page in order (`queueStopEdit` in
   game/world.ts), each holding its line and game stamp from the click: stop editing ending sends them all (the busy
   tag says "Saving stops" meanwhile) and only a game loaded since drops one, on the page or, for one sent before the
   page heard of the load, in the worker (T-3734); an undo or redo, a save, leaving the game
@@ -130,6 +143,12 @@ Web first, so it can be shared as a link.
   stops by station and visit and resolving them against the list the one before left [T-3732]. A state carries only the edges,
   nodes and lines that differ from the last one posted, with the ids in order when they changed
   (`delta`, T-1029); the client rebuilds the full lists from its last ones before anything reads it.
+  The money record goes with each state and "money" message the same way, as its changes from the last one posted
+  (`moneyPatch`, `workers/valuePatch.ts`: key by key, entry by entry; a patch made against a record the page does not
+  hold asks for a whole state), since whole it was about 2 MB on the biggest saves, nearly all of it the regions'
+  ledgers [T-3803]. The waiting rooms and car parks are placed again only for the complexes whose stations, the
+  segments in the grid cells their search read, the station buildings, or a room or lot placed before them near their
+  tries changed (`map/facilityPlace.ts` `FacilityCache`, in the network cache) [T-3803].
   The worker itself reads from the track model only the rows an edit changed: it keeps the last
   rows, the track model lists the lines whose service or net was touched and the stations whose name
   was set since the last read, and a station's name is kept by node (`stateRows.ts`, T-1382). The
@@ -246,6 +265,18 @@ Web first, so it can be shared as a link.
   started or is waiting for water masks; the end of a run (Esc, another tool) and of a drag drop both.
   The router worker's route search and fit stop at their next look (every 20,000 states, every 25 ms)
   when a newer route is asked or the pointer leaves real track.
+- **Edits never queue behind polling** [T-3801, `ClockClient.query`]: the clock worker answers its messages one at
+  a time, in order, so an edit waits behind every read sent before it and behind whatever the worker does on its own
+  clock. A read a panel asks again as the clock, the network or the riders change (`POLL_READS`; anything new that
+  asks on a timer or on every world joins it) waits on the page: one question already answered before is in the
+  worker at a time, and after each answer the next waits twice the worker's own time for it (at most 3 s), so such
+  repeats take at most a third of the worker. A question the page has never had answered (a panel just opened) goes
+  at once. The target for anything new that the worker answers again and again, or runs on its own clock, is under
+  about 0.2 s on the biggest saves (the 2,647-station save in notes/T-3801.md), or split so edits can come between
+  its parts. The hour turning sends only what is new, the next hour's slice, its trips and its boarding hour a task
+  each, and never works out the boarding account there: an account out of date goes on in its steps (T-3804). Known to
+  miss it there: one `today` answer, one boarding step of three big lines (up to 0.3 s), and for any message but an
+  edit the rest of an edit's full state (edits come between its pieces, T-3803).
 - **The demand pool** [T-149, T-173, `workers/demandClient.ts`][T-381]: 3 solving workers on 12 or more
   logical threads, 2 on 6 to 11, 1 on fewer; then a phone or tablet (by its user agent), or a device
   of 4 GB or less, gets 1 (T-2794 adds the same check's lean ways: pixel ratio at most 2, coarse outlines held only near the view; notes/T-2794.md; T-2802: the WASM memories grow 8 MB at a time, not 32, notes/T-2802.md; a phone or tablet by user agent, not a 4 GB desktop, also has no demand cache; no device opens market packs (trips between zones) while "Calculate intercity trips" is off, which is its default on a phone or tablet only, T-2833, T-2838, T-3630; a device reporting 4 GB or less gets a note at the bottom of the map, T-2839, `ui/DeviceNote.tsx`) (`workers/deviceMemory.ts` `smallDevice`, T-2122: a phone's tab holds far
@@ -448,7 +479,11 @@ all results are recomputed. Sizes: notes/T-040.md, notes/T-567.md.
 - **Format** [T-029, `workers/saveFile.ts`]: `TWG1`, a JSON header and the track model's network
   bytes, gzipped. Saves use the bundled gzip codec rather than browser compression streams, and
   compression must round-trip byte for byte before a slot or its backups can be replaced. Loading
-  checks the complete gzip stream and its checksum. The header keeps `city: nyc` and adds optional region and pack metadata. The
+  checks the complete gzip stream and its checksum. The clock worker packs and reads back a save in 64 KB
+  parts, and Download puts the parts in the file without joining them [T-3869]: a page short of memory refuses big
+  buffers first. A save, copy or download that fails for memory is tried again after 1 s, then just after every demand
+  worker is replaced (the memory they held is free until the replacements reopen it; half the solving workers go
+  for the session, as at T-2867); an autosave has them replaced at most once in 10 minutes. The header keeps `city: nyc` and adds optional region and pack metadata. The
   network bytes are TWT6 (the Mercator world frame, T-306), which is TWT5 byte for byte but for the
   magic; its origin fields keep the game's home origin, unused by the frame, and its radii are ground
   metres. After the lines come optional trailing blocks (`sim/src/track/save.rs`): `LUI1` (custom
@@ -465,7 +500,7 @@ all results are recomputed. Sizes: notes/T-040.md, notes/T-567.md.
   build day of each constructed station, edge and line in dense order, as deltas (0 is never
   written: 1 is before recording began, otherwise the game day + 2), written only when some day is
   known [T-2871], then `LBP1` the bus lines' own stop spacings [T-2885] and `LHO1` the lines whose
-  stop order the player set by hand (count, then line indices) [T-2895] and `LBH1` the stops placed by hand on bus lines (count, then per line its index, stop count and stops) [T-2891], and with `LRT1` when any line is paced, `LPC1` the count lines' pacing at merges (count, then per line its index and three f32 bits), which a load keeps instead of pacing again [T-3233], and `LTW1` the lines run on both pairs of quad track and their hidden twins (count, then per line its index and kind, a twin with its line's index) [T-3333]; a save without one loads with none. While a line's trains change over after a service
+  stop order the player set by hand (count, then line indices) [T-2895] and `LBH1` the stops placed by hand on bus lines (count, then per line its index, stop count and stops) [T-2891], and with `LRT1` when any line is paced, `LPC1` the count lines' pacing at merges (count, then per line its index and three f32 bits), which a load keeps instead of pacing again [T-3233], and `LTW1` the lines run on both pairs of quad track and their hidden twins (count, then per line its index and kind, a twin with its line's index) [T-3333], and last `LGN1` the line groups that sit in another group (each such group's number, the number of the group around it and that one's name, bullet text and colour) [T-3423, level 30]; a save without one loads with none. While a line's trains change over after a service
   edit, the network bytes end with the service's eras and shifts, their length and the tag `ERA1`
   (`Service::encode_eras`, T-1071), so the trains load where they were; the network decoder stops
   before them. Formats older than TWT4 (TWT2, TWT3) no longer open: the load says the save is from

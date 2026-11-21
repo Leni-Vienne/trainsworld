@@ -149,7 +149,16 @@ wide so a longer date moves nothing [T-1868].
   length, asked for while the pointer is on the bar and left out until they come); then heads "Train", "Walking",
   "Driving" (and "No route" where its share shows as 0.1% or more), each with a square of its colour, over the
   shares of the trip count and of the distance. The bar, its number, the goal ticks and the star stay on the share
-  of trips (T-2364). The player's job is
+  of trips (T-2364). **Transit by mode** [T-3695, `game/transitModes.ts`]: with Settings' "Show transit by mode" (off
+  by default) every such bar (this one and the World's, the Cities tab's, the city view's two, the far-zoomed city's
+  hover, both trip explorers') draws its transit part as ferry, tram, train, high speed and bus (high speed: a line
+  of high-speed trains, T-817), teal to blueish purple, the same in both themes and every bubble scheme; the hovers
+  add a line of their shares ("Train 15.3%, High speed 2.3%"), and the trip count's strip splits likewise (the
+  distance's does not: no km by kind). A zone's split is its stops' boardings by kind of line on the day shown, so a
+  trip changing kinds counts once on each (by leg count); trips within it count every purpose but the longer trips
+  between places, its trips to other places those alone; a trip explorer shares its routes by ride length. Where
+  no boarding is counted the bar keeps one transit part, as do a pair of zones, bubbles and their hovers, airport and
+  attraction hovers and the trips-by-length graph. The demand bubbles keep three colours. The player's job is
   to make the train share grow. It shows "–" and an empty bar until the zone has figures of its own
   (a solve's, or the bare pass's for a zone no station reaches; not the no-rail split a pack gives
   before that), and over dead space [T-318]. The hover says "on a weekday", "on a Saturday", "on a Sunday" or "on average" for the
@@ -307,7 +316,7 @@ wide so a longer date moves nothing [T-1868].
   slower and faster buttons with the speed between them as text [T-3653]: one step along the slider's 20 stops (`SLIDER_STOPS` in `game/clock.ts`,
   real to 100x, spaced for the eye; "real" is 1 game second per second, 1/60 of 1x, and "4real" is four times that), each button off at its end; the
   comma key slows and the period key speeds up by one step (`clock.stepSpeed`, `main.ts`; listed in Help; held, they keep stepping every 90 ms at most [T-3717]). **Click the speed** for the slider [T-1664, T-3717];
-  the speed stays until changed (not saved with the game). Replaced the 1x, 4x, 16x buttons; Settings > Map "Use legacy time speed controls" (off by default, remembered in the browser, T-3765) brings them back: pause, 1x, 4x and a third button showing the speed as text (a click runs it, a double click opens the slider), with the comma and period keys still stepping.
+  the speed stays until changed (not saved with the game). Replaced the 1x, 4x, 16x buttons; Settings > Map "Use legacy time speed controls" (remembered in the browser, T-3765; on for a browser with no stored settings and no saved game, off for one that has played before without choosing, T-3847) brings them back: pause, 1x, 4x and a third button showing the speed as text (a click runs it, a double click opens the slider), with the comma and period keys still stepping.
   **While the player's edits are not yet in the figures** the clock runs no faster than 4x [T-1665,
   `demandCapped` in `game/lineFigures.ts`]: after an edit, until every line it changed has its riders
   again (each reads "calculating..." meanwhile: its cluster's local result, or the
@@ -645,7 +654,7 @@ choice (the map's purpose filter, the same list as the one on the map's demand r
 commuter and longer-trip bubbles, not station discs; ignored while bubbles are selected, T-936, but not while a whole zone is, T-1726) and Detail (4 steps from coarser to finer,
 the third by default; its hover reads "How many bubbles are aggregated together"; [T-795, T-1838]), the Colors
 choice (3-color by default [T-1724], the old Mode mix, 2-color [T-833], the old Train share, which shows two colour pickers labelled 0% train and
-100% train, Purpose [T-2886] or Color blind [T-3005]; no hovers on any of it [T-804, T-1838]; both in [ui-demand-views.md](ui-demand-views.md) "Local trip bubbles"), Station circles with a Size slider (0.5-2x, 1x by default, the station ridership circles' radius; [T-1565], [ui-demand-views.md](ui-demand-views.md) "Station ridership circles"), Show (trains, station names [off by default, T-1729], "Track at capacity" [the capacity markers; hover "Marks where stations or track cannot smoothly handle scheduled train frequencies", T-1843], "Crowded trains" [T-1152, T-1843, T-2236: the Traffic view's red edges, on by default; hover "Stretches where trains carry more than their rated load at the busiest hour"; [ui-map.md](ui-map.md) "Track display"], flat junctions and crossings [no hover, T-1843], "Lines side by side" [T-1886: lines sharing track as bands beside each other, on by default, T-2346; [ui-map.md](ui-map.md) "Lines sharing track side by side"], map labels, Real network (None, Passenger or All, then "Show stations", off by default, [ui-map.md](ui-map.md) "Real network" [T-3570]), Terrain [hover "Construction is more expensive in steep terrain", T-1843], then "Show levels" over the level buttons +3 to -3 [T-3420], with a small "Show all" button beside the label while any level is hidden [T-3593; its space is kept, so the row does not move]: all lit, a click hides that level's track, the lines on it, its stations, junction and ramp marks and the cars of trains on it, and picks pass over them, so pieces laid exactly over each other at two levels can be reached; a ramp fades toward a hidden level; no hovers; kept while the page is open, not remembered, so a reload never opens on a map missing a level; under them "Buses and ferries", ticked by default, unticked hides every bus and ferry line's route, stops and vehicles on the map and from picks, kept while the page is open as the levels are, the Lines tab hides lines one by one, [ui-inspectors.md](ui-inspectors.md) "Hiding lines"), then Game (right after Show; below), Riders on trains
+100% train, Purpose [T-2886] or Color blind [T-3005]; no hovers on any of it [T-804, T-1838]; both in [ui-demand-views.md](ui-demand-views.md) "Local trip bubbles"), "Show transit by mode" (off by default, no hover; "The goal number" [T-3695]), Station circles with a Size slider (0.5-2x, 1x by default, the station ridership circles' radius; [T-1565], [ui-demand-views.md](ui-demand-views.md) "Station ridership circles"), Show (trains, station names [off by default, T-1729], "Track at capacity" [the capacity markers; hover "Marks where stations or track cannot smoothly handle scheduled train frequencies", T-1843], "Crowded trains" [T-1152, T-1843, T-2236: the Traffic view's red edges, on by default; hover "Stretches where trains carry more than their rated load at the busiest hour"; [ui-map.md](ui-map.md) "Track display"], flat junctions and crossings [no hover, T-1843], "Lines side by side" [T-1886: lines sharing track as bands beside each other, on by default, T-2346; [ui-map.md](ui-map.md) "Lines sharing track side by side"], map labels, Real network (None, Passenger or All, then "Show stations", off by default, [ui-map.md](ui-map.md) "Real network" [T-3570]), Terrain [hover "Construction is more expensive in steep terrain", T-1843], then "Show levels" over the level buttons +3 to -3 [T-3420], with a small "Show all" button beside the label while any level is hidden [T-3593; its space is kept, so the row does not move]: all lit, a click hides that level's track, the lines on it, its stations, junction and ramp marks and the cars of trains on it, and picks pass over them, so pieces laid exactly over each other at two levels can be reached; a ramp fades toward a hidden level; no hovers; kept while the page is open, not remembered, so a reload never opens on a map missing a level; under them "Buses and ferries", ticked by default, unticked hides every bus and ferry line's route, stops and vehicles on the map and from picks, kept while the page is open as the levels are, the Lines tab hides lines one by one, [ui-inspectors.md](ui-inspectors.md) "Hiding lines"), then Game (right after Show; below), Riders on trains
 and platforms: no setting, since each train's fullness and each platform's filling up are always drawn [T-164, T-3579], Stations up close (Faces and Sound, both on by default, no hovers [T-1843], and a Volume slider while Sound is on, the one volume for every sound, building and fare-change sounds included [T-1725]; [ui-map.md](ui-map.md) Life at stations) [T-686], Map (Flat or Globe, flat by default; hover "Zoomed in to a city, the globe becomes the flat map"; [ui-map.md](ui-map.md) "Globe") [T-033], then two sliders: Line width (50-200% of the drawn width of lines, track, casings and trains, 100% by default; station shapes and picking follow it; once double track parts into its two tracks up close, those keep their width on the ground) [T-1248] and Base map (contrast, 0-100%, 100% by default: below it every basemap colour but water and the land, so roads, parks, woods, buildings, boundaries and airfields, is mixed that much toward the land colour, in both themes, the basemap's labels fade toward transparent by it instead, text and halo alike, so a faded name never leaves a pale patch on water [T-1266]; the real network is left as it is, T-1291; `map/basemap.ts`) [T-1249], and "Rotate map with right drag" (off by default, Anita 2026-11-02: with no tilt it adds little; off turns the map back to north; [ui-map.md](ui-map.md) "Globe") [T-2031], "Use legacy time speed controls" (off by default, T-3765; the top bar's older pause, 1x, 4x and custom-speed buttons, `Speed` in `ui/TopBar.tsx`), and "Show zoom buttons" (on by default: a plus and a minus at the map's right edge, halfway down, one zoom step a click with the map's own easing, `ui/ZoomButtons.tsx`; no hover, just aria labels) [T-3268], Theme (Light or Dark, light by default, over Pink, Blue or Green) [T-039], Panel and text size, Units (US units, Currency), Performance (Use more cores, Run in background, Recalculate trips while paused, Memory), Default bullet shapes (below), then,
 when accounts are on, Account [T-1139]: who is logged in ("Logged in as alice", "Logged in with
 Google" or "Not logged in") and a button, Account settings or Sign in, that opens the same account
@@ -726,8 +735,8 @@ track turned around, lines rerouted), each row a click that shows the place and 
 and closes the list; under the row "3 places to fix after the switch" (or "Nothing left to fix after the switch")
 with Show list, until another game opens. In a normal game a
 row "Tutorial" with a Start again button (restarts the [tutorial card](#tutorial-card))
-sits under the mode [T-1822, T-1835]. Then "Name new stations after their complex" [T-3759], on by default
-and remembered in the browser, shown before a game is loaded too ([ui-inspectors.md](ui-inspectors.md) "Renaming"). Last in the section, "Buses obey one-way streets" [T-3480; moved here from Show, T-3579], off by default and remembered
+sits under the mode [T-1822, T-1835]. Then "Name new stations after their complex" [T-3759], off for a new player
+(on for one who had settings stored before T-3814) and remembered in the browser, shown before a game is loaded too ([ui-inspectors.md](ui-inspectors.md) "Renaming"). Last in the section, "Buses obey one-way streets" [T-3480; moved here from Show, T-3579], off by default and remembered
 in the browser: a bus route runs a one-way street only its way, with arrows on those streets in the bus tool. It shows before a game is loaded too.
 
 ## Finances tab (id `money`)
@@ -820,6 +829,9 @@ to 1.50x") [T-1626]. Then "Transfer fare" with the fare each change of line pays
 ("$0.00" in a new game, by $0.25 as the base fare, a click types one; at most the base fare, T-3689), shown times the country's
 fare scale as the curve is [T-1801]. Last, one row "Japan fares" (the country above; no hover on the label, T-1852)
 with its fares as a multiple of the reference country's (T-2679, docs/track-and-service.md "Fares by country").
+With fares by city (T-3766) the fares and this row are a city's, picked as the country is (the selected station's
+city, the selected city, the nearest built station's, the zone in view, the home city): "Osaka fares", no anchor
+icon, its multiple read against the reference country's default fares.
 The reference country's row shows a plain "1.00x" in the stepper's column, no stepper and no buttons (hover
 "Reference country" over "Other countries' fares are set as a multiple of United States fares."). Any other
 country's is a stepper, its default multiple until set (a US-started game's Mexico 0.40x, Japan 0.63x; hover
@@ -868,11 +880,13 @@ come right up to a neighbour (0.1 km) so a drag can make a step; the rows as the
 bin ("Remove point"; the base fare has none), their amount boxes one width (64 px, seven characters such as "+$55.50"
 or "+¥1,500") with the figure centred [T-3749, T-3751]; "Add point" (pressed while armed; off at 12 points, hover "At
 most 12 points") and, for a curve of other than three points, "Use simple curve", which asks "Go back to three points
-at 0, 20 and 100 km? The other points are dropped." and keeps the fares at those distances; the high-speed, bus, ferry
-and transfer rows as the Money tab shows them; the estimate rows while a change is unsolved; the countries: the
+at 0, 20 and 100 km? The other points are dropped." and keeps the fares at those distances; the high-speed, bus, ferry (all three boat sizes once a ferry line exists,
+T-3892) and transfer rows as the Money tab shows them; the estimate rows while a change is unsolved; the countries: the
 reference country, then every country with a built station by name, each row its multiple (the reference a plain
-1.00x), its base fare as charged and the anchor and undo buttons, under one row of column heads, "Fares by country"
-(bold, over the names), "Multiple" and "Base fare" [T-3749]. Esc in a typed value's box cancels the typing and keeps
+1.00x), its base fare as charged and the anchor and undo buttons, under one row of column heads, "Fares by
+[country | city]" (bold, over the names; the two words a switch, T-3766), "Multiple" and "Base fare" [T-3749]. With
+"city" pressed the rows are every city with a built station by name, each its multiple, base fare and undo (no
+reference row, no anchor), and the picker above lists cities ("Fares in [Osaka]"). Esc in a typed value's box cancels the typing and keeps
 the panel. **Steps in the rows** (the panel's only; the Money tab's three rows stay rates) [T-3749]: a stretch of
 0.5 km or less that is not the last reads as a step, one row
 "10 km" with the fare's jump there, "+$2.50" with no "per km" (stepped by the base fare's step, typed, never below
@@ -895,8 +909,8 @@ left below the fare zones for a fare per stop (T-3744).
 above the countries, the heading "Fare zones" (bold, over a rule, with a hover on the charging rule), then each fare area: its name in a box that reads
 as plain text until hovered (typed over, Enter or leaving it renames; no recalculation), "Paint stations" with a
 brush, which closes the panel and starts the Fare zones tool on that area, and, left of a bin ("Remove fare area", asking
-"Remove {name}? Trips between its stations pay by distance again."; its stations keep their codes, which count as
-none until Z3 tidies them), the game's usual checkbox with no text, ticked while the area is on (hover "Disable {name}" or "Enable {name}"; T-3783, T-3791; off, trips pay by distance as if the area did not exist, its paint, name and prices kept and its price rows dimmed; `FareArea.off` in the header's `fares.zones`, sent as a `fareZones` edit like removal, so not undone; `demandFares()` leaves an off area out); then one row per zone count, "1 fare zone", "2 fare zones" ..., as many as the area's
+"Remove {name}? Trips between its stations pay by distance again."; its stations leave it, not undone, as the
+removal isn't), the game's usual checkbox with no text, ticked while the area is on (hover "Disable {name}" or "Enable {name}"; T-3783, T-3791; off, trips pay by distance as if the area did not exist, its paint, name and prices kept and its price rows dimmed; `FareArea.off` in the header's `fares.zones`, sent as a `fareZones` edit like removal, so not undone; `demandFares()` leaves an off area out); then one row per zone count, "1 fare zone", "2 fare zones" ..., as many as the area's
 highest zone painted and at least three, each its price as charged in the panel's country (a hover on each: what rides it is for; the stored price times
 that country's rate multiple, `countryFareScales`, as demand charges it; never below the base fare) in a stepper by the base fare's step, typed on a click. A price
 change keeps prices from falling: the later ones rise to it, the earlier ones come down to it. Last, "New fare area",
@@ -909,7 +923,14 @@ that button; nothing else in the game changes.
 (no Build tab button; started from the panel): its bar at the map's top centre, as the station tool's, with the area
 (a picker once there are two) and "Fare zone" with a stepper of the zone a click gives, 1 to 12 on its colour or
 "none" (which takes stations of that area out of it, leaving other areas' stations alone); the click mode's descriptor "Painting fare zones" and the hint
-"Click a station or drag around several." ("Tap a station or draw around several." on touch). A click on a station
+"Click a station or drag around several." ("Tap a station or draw around several." on touch). Under them a second
+row: "Set zones by distance" (rings, a toggle like "Add point"), which while on shows "Ring width" with a stepper
+(0.5 to 30 km or mi, 5 km or 3 mi at first, kept for the session, not an edit) and the hint "Click the station at the
+center." ("Tap ..." on touch); a left drag then pans the map, the station under the pointer previews its rings (each
+ring filled faintly in its zone's colour, dashed lines between), and a click on a station gives every station or
+complex whose middle is under 12 rings from that complex's middle (ground distance) zone floor(d / width) + 1 in the
+picked area, one `stationFares` edit (one Ctrl+Z), turning the toggle off; stations past ring 12 stay as they are,
+and complexes in another area ask the "Move stations" question as a loop does. Esc turns it off. A click on a station
 (within 14 px, from zoom 9 where stations are drawn) gives it and its whole complex the zone; a left drag draws a loop (kept in map coordinates, so zooming or panning mid-drag leaves it on the ground), dashed and shaded in the
 zone's colour, ringing the stations it would change (with "none", only those of the picked area), and on release every station inside (and their complexes) takes
 it. A station is in one fare area at most (T-3791): when a click or loop takes in a complex shown in another area, the
@@ -1261,7 +1282,10 @@ then removed from the address bar; other URL parameters are untouched [T-310, T-
   [T-988 stage 3]; then, when the games list carries `played` (seconds), "3 h 20 min played" and, when `/trainworld/me` says
   `nameHidden`, a red "Your name is hidden from others. Pick another." [T-3230]; then the **flag and display name**
   (T-3269, T-3279, as City Circles' quiz; when `/noritetsu/config` says `trainworldFlags`): the flag, or an empty 4:3
-  outline while there is none, then the leaderboard name. The flag opens a picker over the page (300 px wide, up to
+  outline while there is none, then the leaderboard name and, once the account has a name and the server says
+  `trainworldRename`, **Change name** at the row's end (T-3807): a field with the name in its place, Save and Back;
+  the server allows two changes a day (a first name, set by Join or Share, is not one), and past that the row says
+  "You can change your name twice a day. Try again in 5 hours.", as Join and Share do when they would change it. The flag opens a picker over the page (300 px wide, up to
   480 px tall, under the flag or above it when there is more room, free to reach past the panel): No flag (only while
   one is picked), the country the player is probably in, then every country, then other places (the EU, Amsterdam,
   Chicago, Washington, D.C., New York City and Japan's 47 prefectures, each with its country in grey), then the game's
@@ -1286,7 +1310,7 @@ then removed from the address bar; other URL parameters are untouched [T-310, T-
   Don't add asks "Are you sure? Games kept only in this browser are lost if its storage is
   cleared." with Keep them here only and Add them ("Keep it here only", "Add it" for one). Added
   games go up at once; kept ones are never asked about again and carry the crossed cloud.
-- **Scores**: while signed in, each normal game in a browser slot sends its points (the forecast weekday's, the All cities row's figure, T-3465) and its best 64 cities' points, when they change and at
+- **Scores**: while signed in, each normal game in a browser slot sends its points (the forecast weekday's, the All cities row's figure, T-3465), its best 64 cities' points and (T-3879) its weekday profit in US$ (`dayProfit`: the weekday's fares minus running costs and upkeep, the edit note's profit figure; no new trains, construction or loan), with (T-3885) the same for each of those cities (`dayProfitByRegion`), when they change and at
   most every 2 wall minutes (at once on the first send and when the page is hidden), joined or not.
   A `?new=1` page or one whose slot is open elsewhere sends nothing. Each slot has a random game id
   in localStorage (`trainworld.score-games.v1`), or the id of its game on the account when it has
@@ -1304,7 +1328,11 @@ then removed from the address bar; other URL parameters are untouched [T-310, T-
 - **Only the published game's scores** (T-3707): each normal send carries the build's stamp (`build`,
   `__TW_BUILD__`). The server keeps them only from anita.garden with a stamp on the site's `builds.json`, which
   `tools/deploy.py` writes at each publish; a refusal (426 `unpublished`) stops this page's sends for 10 minutes.
-- **Leaderboards**: the trophy opens a centred modal: a picker (World, then up to two countries in
+- **Leaderboards**: the trophy opens a centred modal. Against a server whose config says `trainworldProfit`, a
+  Points / Profit switch sits at the top (T-3879, T-3885): Profit ranks weekday profit on the same places as points
+  (the shown currency, short; "$1,904,120,812 profit per weekday" in the hover), and only a figure above 0 has a row; a
+  city's is the game's profit split as the region ledgers split money, a country's its cities' summed, losses included.
+  The switch keeps the place picked. Then a picker (World, then up to two countries in
   this game, then its cities by points; typing searches cities and countries, a country by its name in
   the player's language or in English), the top 50 (rank, name, points short, the
   exact figure in the hover; the person's flag after the name, 16 x 12 px, its name in the hover; a long name is cut, the flag never), the player's own row under them when lower, "Nobody here yet." on an
@@ -1390,11 +1418,11 @@ server `trainworld_community.go`, its `docs/trainworld-api.md` "Community"; note
 
 ## Schedule panel
 
-[T-3346 stage 1, T-3469, T-3475, T-3521; `ui/inspector/SchedulePanel.tsx`, `TrainTable.tsx`, sim `TrackApi.station_departures`; notes/T-3346.md, notes/T-3521.md]
+[T-3346 stage 1, T-3469, T-3475, T-3521, T-3817; `ui/inspector/SchedulePanel.tsx`, `TrainTable.tsx`, sim `TrackApi.station_departures`; notes/T-3346.md, notes/T-3521.md, notes/T-3817.md]
 
 - **A line's**: opened from the bigger icon by a running line's schedule heading (a station timetable,
   hover "Detailed schedule"); a centred modal in the saved games panel's frame, up to 1320 px wide; closed by its
-  close button, Esc or a click outside it (the dock's timetable chart, open under it, keeps going). Heading: the
+  close button, Esc or a click outside it. Heading: the
   line's bullet and name, "schedule" in grey, then the mode choice, drawn only once Detailed and
   Exact are built (stages 3 and 6; Simple alone shows no choice). A player who never opens it sees nothing else new.
 - **Left**: the line panel's schedule table, its steppers, dots and hovers, under a "Set by" Trains / Headway
@@ -1437,23 +1465,44 @@ server `trainworld_community.go`, its `docs/trainworld-api.md` "Community"; note
   hidden twin's trains too. Times come from the sim, each trip's own (`station_departures`: its `draw` plus its
   profile's `dep` at the stop), the trips the chart and map draw.
 - **Timetable** (T-3469), as a printed one: one direction at a time ("to Gum" / "to Ash", the way the chart reads
-  top to bottom first; the other lines toggle at the end of that row), stations down the side, one column per train
-  under its line's bullet (a bullet too wide for a column becomes its letters down a strip of the line's colour),
-  times in 10 px type as "742" / "1008" in the line's colour (`legibleOn`), the departure at each stop and the
-  arrival at the last, "|" where a group's train runs through a station; a rule every 5 rows, time marks along the
-  top, a past train faded, the time now an accent line. It covers the hour before this one and the day after,
-  scrolled sideways, now a quarter of the way in. Each column stands at its train's first time on the chart's time
-  scale: the most compact scale at which 95% of columns are pushed no more than their own width from their time
-  (trains leaving seconds apart push one regardless).
+  top to bottom first), with the other lines toggle right after that switch, as tall as it (T-3819); stations down
+  the side, one column per train under its line's bullet (a bullet too wide for a column becomes its letters down a
+  strip of the line's colour), times in 10 px type as "742" / "1008" in the line's colour (`legibleOn`), the
+  departure at each stop and the arrival at the last, "|" where a group's train runs through a station; a rule every
+  5 rows, time marks along the top, a past train faded, the time now an accent line. It covers the hour before this
+  one and the day after, opening with now a quarter of the way in. Each column stands at its train's first time.
+- **Zoom** (T-3817): the wheel over the table or chart zooms both about the pointer (1.25 times a notch, coalesced to
+  one step a frame), from the whole day across to a quarter hour; over the station names it scrolls the rows. A
+  sideways wheel or Shift-wheel, a drag (mouse) or a swipe (touch) moves the view. It opens at the coarsest zoom
+  level that draws at least 95% of the day's columns (no closer than an hour across) and keeps the
+  player's zoom while the panel shows the same line. **Columns that fit**: only the columns that fit side by side
+  at the zoom are drawn; the rest are left out. The choice is made over the whole day in zoom levels (columns at
+  least 10 s x 1.41^n apart, n the finest level whose gap is a column's width): each level keeps the coarser one's
+  columns and adds, left to right, each that clears them, so scrolling never changes the set and zooming in only
+  adds columns. **Bullets**: every train's bullet is drawn, overlapping where they must, each with a 1 px rim in the
+  panel's background (light in light mode, dark in dark) so a pile reads as many; the drawn columns' bullets lie in
+  front. Hovering a bullet (the nearest within 9 px, so one under others is reached too) or a column lights that
+  train over a veil: its bullet in front and its column, covering the drawn columns it lands on, whether or not it
+  is drawn at the zoom; its path on the chart too.
+- **Related lines** (T-3818, T-3846): while the other lines toggle is on (it shows whenever the line has any), the trains of
+  each line the line panel's related lines draw beside it (`lineRelated`, kind beside; not its own quad twin, nor a
+  group's own lines) that runs on the line's track at any point, or shares at least 3 stops with it (a complex counted
+  once) that are at least 40% of either line's stops, get columns too, at the rows where both stop (a station's complex counts), "|" only within a
+  stretch it runs beside. They never take a column from the line's own trains: at each zoom level they fill only
+  the gaps the line's own columns leave, and the opening zoom counts the line's own columns alone. Their bullets sit
+  2 px lower and behind the line's own (related behind, own behind, related drawn, own drawn; related bullets behind
+  kept one per 3 px); their bullets and times at 50%, 25% once gone, 50% when lit. Hovering a bullet
+  of another line names the line where its letters don't already. On the chart they are drawn as other lines, stop
+  to stop where they have no shared track.
 - **Chart**: the timetable chart ([ui-inspectors.md](ui-inspectors.md) "The timetable chart") under the timetable,
-  its stops 240 px tall, scaled by distance, its time axis the table's: the table's scroll moves it, the wheel over
-  it scrolls both, and it does not zoom. It draws the table's direction in front and the other direction dimmed
-  behind, every line of a group alike (another line's way by most of the track it shares). Hovering a train, its
-  column or its path, lights it in both and fades the rest (a veil over the table, the chart's trains at 35%).
+  its stops 240 px tall, scaled by distance, on the table's time axis: it zooms and scrolls with it. It draws the
+  table's direction in front and the other direction dimmed behind, every line of a group alike (another line's way
+  by most of the track it shares). Hovering a train, its column or its path, lights it in both and fades the rest (a
+  veil over the table, the chart's trains at 35%).
 - **A group's**: from the group view's chart icon, for a group with two or more running rail lines. Heading the
   group's pill and name, then "schedule"; the body is the timetable and chart at the panel's width, the longest line
-  (by length) down the side, each other line's trains in the table at the stations it shares with it (a line
-  sharing fewer than two is left out of the table), and in the chart drawn at full strength in their colours where
+  (by length) down the side, each other line's trains in the table at the stations it shares with it, a station's
+  complex counting as the station (a line sharing fewer than two is left out of the table), and in the chart drawn at full strength in their colours where
   they share its track (T-2660's mapping); the other lines toggle adds lines outside the group as the line chart does.
 
 ## Start menu

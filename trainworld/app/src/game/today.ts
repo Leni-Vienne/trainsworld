@@ -18,6 +18,7 @@ import { linesPending, type PendingKind } from "./lineFigures";
 import { moneyState } from "./money";
 import { lineRunFactor } from "./regionMoney";
 import { clockTime, trainKind } from "./format";
+import { boatOf, boatRunKm } from "./boats";
 import { hourSpan, PERIODS, periodAt } from "./periods";
 import { crowdColour, rgb } from "./palette";
 import { tipEnds, tipStrip } from "../ui/tip";
@@ -25,7 +26,6 @@ import { holidayOn, kindIn, lineCountry } from "./holidays";
 import type { Demand, LineInput, LineStats } from "./types";
 import type { Vehicle } from "./vehicle";
 import { cameraMoving, guideVerbose } from "./ui";
-import { perfOff } from "../perfFlags";
 
 export interface LineToday {
   /** riders boarded in the past 24 hours, or yesterday (a change of line boards again), the line's own stops */
@@ -198,7 +198,7 @@ export function runningToday(l: LineInput, st: LineStats): number {
   for (let h = Math.floor(t0); h < t; h++) {
     const p = periodAt(h * 3600);
     // T-1464: a bus line's buses cost a bus-km each
-    const perKm = st.bus?.ferry ? m.runCostBoatKm : st.bus ? m.runCostBusKm : k.runCostTrainKm + cars * k.runCostCarKm;
+    const perKm = st.bus?.ferry ? boatRunKm(m, boatOf(st.bus)) : st.bus ? m.runCostBusKm : k.runCostTrainKm + cars * k.runCostCarKm;
     cost += tph[p] * (st.oneWay ? 1 : 2) * st.km * perKm * m.economy *(Math.min(h + 1, t) - Math.max(h, t0));
   }
   // T-2669: at its countries' prices, as the clock worker drains it
@@ -314,17 +314,11 @@ export const stationsToday = computed(() => {
 const ASK_MS = 250;
 let users = 0, timer = 0, busy = false, askedAt = NaN, askedVersion = -1;
 let askedDv: unknown = null;
-/** T-3793: no ask before this (performance.now): twice the last answer's wait after it came, at most REST_MAX_MS, so
- * on a very big game (~0.4 s an answer) the clock worker is not kept busy answering and an edit waits behind one
- * answer at most; the cap, since the wait also counts reads held behind stop clicks or a long hour's turn */
-let restUntil = 0;
-const REST_MAX_MS = 1000;
 
-/** `soon`: past the rest (a stop edit's new count) */
+/** `soon`: past the clock client's rest for panel reads (a stop edit's new count, the panel just opened; T-3801) */
 function ask(force = false, soon = force) {
   // T-1207: the Lines tab's rows re-rendered four times a second while the map was dragged
   if (busy || (!force && cameraMoving.now)) return;
-  if (!soon && performance.now() < restUntil) return;
   // the network or the account (new riders, the hour turning) changed
   const t = clock.now(), v = (world.peek()?.version ?? -1) * 1e6 + accountVersion.peek();
   // the income the worker holds as it answers came from this result (clockClient posts it on each new one)
@@ -337,11 +331,8 @@ function ask(force = false, soon = force) {
   askedDv = dv;
   const service = new Map<string, { tph: number[]; cars: number }>();
   for (const [id, ld] of dv?.lines ?? []) if (ld.tph && ld.cars !== undefined) service.set(id, { tph: ld.tph, cars: ld.cars });
-  const sentAt = performance.now();
-  void queryClock({ what: "today" }).then((d) => {
+  void queryClock({ what: "today" }, soon).then((d) => {
     busy = false;
-    const back = performance.now();
-    restUntil = back + Math.min(REST_MAX_MS, 2 * (back - sentAt));
     if (!d) return;
     const w = world.peek();
     readFor = new Map((w?.save.lines ?? []).map((l) => [l.id, l.stops]));
@@ -362,7 +353,7 @@ function ask(force = false, soon = force) {
     // half-done answer's (a local solve reads a long line far low); the final one replaces them when it lands
     for (const [id, x] of next) {
       const s = settled.get(id);
-      if (pend.get(id) === "change" && s && !perfOff("settledHold")) next.set(id, { ...x, riders: s.riders, fullTrains: s.fullTrains, leftBehind: s.leftBehind, fares: s.fares, dayFares: s.dayFares, stops: s.stops.length === x.stops.length ? s.stops : x.stops });
+      if (pend.get(id) === "change" && s) next.set(id, { ...x, riders: s.riders, fullTrains: s.fullTrains, leftBehind: s.leftBehind, fares: s.fares, dayFares: s.dayFares, stops: s.stops.length === x.stops.length ? s.stops : x.stops });
       else settled.set(id, x);
     }
     for (const id of settled.keys()) if (!next.has(id) && !pend.has(id)) settled.delete(id);

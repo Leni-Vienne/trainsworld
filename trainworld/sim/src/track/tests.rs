@@ -21,7 +21,7 @@ pub fn node(w: &mut TrackWorld, x: f64, y: f64, level: i8) -> u32 {
 pub fn edge(w: &mut TrackWorld, a: u32, b: u32, pis: &[(f64, f64)], level: i8) -> Result<u32, Vec<Issue>> {
     let id = w.net.alloc_edge();
     let pis = pis.iter().map(|&(x, y)| Pi::new(x, y, 0.0, level)).collect();
-    w.apply(Op::Edge { id, data: Some(EdgeData { a, b, tracks: 2, pis, built: true, off: false, thru: vec![], crossover: false, kind: TrackKind::Regular, sep: false, day: 0, oneway: 0, join: [0; 2], limit: 0 }) })?;
+    w.apply(Op::Edge { id, data: Some(EdgeData { a, b, tracks: 2, pis, built: true, off: false, thru: vec![], crossover: false, kind: TrackKind::Regular, sep: false, day: 0, oneway: 0, join: [0; 2], limit: 0, ramp: 0 }) })?;
     Ok(id)
 }
 
@@ -45,7 +45,7 @@ pub fn terminals_at_dead_ends(w: &mut TrackWorld) {
 pub fn line(w: &mut TrackWorld, stops: &[u32], tph: [f32; 3]) -> u32 {
     let path = w.net.route(stops, &[]).expect("no route");
     let id = w.net.alloc_line();
-    let d = LineData { rows: 0, x: Default::default(), symbol: String::new(), trains: None, auto: None, name: format!("L{id}"), colour: 0, stops: stops.to_vec(), path, tph, dwell_s: 30.0, turnaround_s: 180.0, cars: 0, fast: false, bus: None, ferry: None, group: 0, group_name: String::new(), group_look: Default::default(), day: 0, hand: false, one_way: false, limit: 0, twin: Default::default(), weekend: Default::default(), ones: vec![], fare_dist: false };
+    let d = LineData { rows: 0, x: Default::default(), symbol: String::new(), trains: None, auto: None, name: format!("L{id}"), colour: 0, stops: stops.to_vec(), path, tph, dwell_s: 30.0, turnaround_s: 180.0, cars: 0, fast: false, bus: None, ferry: None, group: 0, group_name: String::new(), group_look: Default::default(), outer: vec![], day: 0, hand: false, one_way: false, limit: 0, twin: Default::default(), weekend: Default::default(), ones: vec![], fare_dist: false };
     w.apply(Op::Line { id, data: Some(d) }).unwrap();
     id
 }
@@ -68,7 +68,7 @@ fn unused_blueprint_extension_preserves_running_service_but_planned_lines_previe
         let trips = w.svc.trips(&w.net, 28800.0, 32400.0);
         let blueprint = w.net.alloc_edge();
         w.apply(Op::Edge { id: blueprint, data: Some(EdgeData {
-            a: b, b: c, tracks: 2, pis: vec![], built: false, off: false, thru: vec![], crossover: false, kind: TrackKind::Regular, sep: false, day: 0, oneway: 0, join: [0; 2], limit: 0,
+            a: b, b: c, tracks: 2, pis: vec![], built: false, off: false, thru: vec![], crossover: false, kind: TrackKind::Regular, sep: false, day: 0, oneway: 0, join: [0; 2], limit: 0, ramp: 0,
         }) }).unwrap();
         let check = |w: &TrackWorld| {
             let after = &w.svc.lines[l as usize];
@@ -100,7 +100,7 @@ fn unused_blueprint_extension_preserves_running_service_but_planned_lines_previe
 pub fn planned_edge(w: &mut TrackWorld, a: u32, b: u32, pis: &[(f64, f64)], level: i8) -> u32 {
     let id = w.net.alloc_edge();
     let pis = pis.iter().map(|&(x, y)| Pi::new(x, y, 0.0, level)).collect();
-    w.apply(Op::Edge { id, data: Some(EdgeData { a, b, tracks: 2, pis, built: false, off: false, thru: vec![], crossover: false, kind: TrackKind::Regular, sep: false, day: 0, oneway: 0, join: [0; 2], limit: 0 }) }).unwrap();
+    w.apply(Op::Edge { id, data: Some(EdgeData { a, b, tracks: 2, pis, built: false, off: false, thru: vec![], crossover: false, kind: TrackKind::Regular, sep: false, day: 0, oneway: 0, join: [0; 2], limit: 0, ramp: 0 }) }).unwrap();
     id
 }
 
@@ -269,10 +269,10 @@ fn a_partly_built_one_way_stretch_never_returns_over_unbuilt_track() {
     edge(&mut w, d, a, &[], 0).unwrap();
     edge(&mut w, a, j, &[], 0).unwrap();
     let jb = w.net.alloc_edge();
-    w.apply(Op::Edge { id: jb, data: Some(EdgeData { a: j, b, tracks: 1, pis: vec![], built: true, off: false, thru: vec![], crossover: false, kind: TrackKind::Regular, sep: false, day: 0, oneway: 1, join: [0; 2], limit: 0 }) }).unwrap();
+    w.apply(Op::Edge { id: jb, data: Some(EdgeData { a: j, b, tracks: 1, pis: vec![], built: true, off: false, thru: vec![], crossover: false, kind: TrackKind::Regular, sep: false, day: 0, oneway: 1, join: [0; 2], limit: 0, ramp: 0 }) }).unwrap();
     let bj = w.net.alloc_edge();
     let bj_pis = [(7500.0, 0.0), (7500.0, 1500.0), (5000.0, 1500.0), (3400.0, 0.0)].into_iter().map(|(x, y)| Pi::new(x, y, 0.0, 0)).collect();
-    w.apply(Op::Edge { id: bj, data: Some(EdgeData { a: b, b: j, tracks: 1, pis: bj_pis, built: false, off: false, thru: vec![], crossover: false, kind: TrackKind::Regular, sep: false, day: 0, oneway: 1, join: [0; 2], limit: 0 }) }).unwrap();
+    w.apply(Op::Edge { id: bj, data: Some(EdgeData { a: b, b: j, tracks: 1, pis: bj_pis, built: false, off: false, thru: vec![], crossover: false, kind: TrackKind::Regular, sep: false, day: 0, oneway: 1, join: [0; 2], limit: 0, ramp: 0 }) }).unwrap();
     for n in [d, a, b] {
         station(&mut w, n, 200);
     }
@@ -1217,7 +1217,7 @@ fn shared_track_splits_its_capacity() {
 pub(super) fn new_line(w: &mut TrackWorld, stops: &[u32], trains: [u32; 3]) -> u32 {
     let path = w.net.route(stops, &[]).expect("no route");
     let id = w.net.alloc_line();
-    let d = LineData { rows: 0, x: Default::default(), symbol: String::new(), trains: Some(trains), auto: None, name: format!("L{id}"), colour: 0, stops: stops.to_vec(), path, tph: [6.0, 3.0, 1.0], dwell_s: 30.0, turnaround_s: 180.0, cars: 0, fast: false, bus: None, ferry: None, group: 0, group_name: String::new(), group_look: Default::default(), day: 0, hand: false, one_way: false, limit: 0, twin: Default::default(), weekend: Default::default(), ones: vec![], fare_dist: false };
+    let d = LineData { rows: 0, x: Default::default(), symbol: String::new(), trains: Some(trains), auto: None, name: format!("L{id}"), colour: 0, stops: stops.to_vec(), path, tph: [6.0, 3.0, 1.0], dwell_s: 30.0, turnaround_s: 180.0, cars: 0, fast: false, bus: None, ferry: None, group: 0, group_name: String::new(), group_look: Default::default(), outer: vec![], day: 0, hand: false, one_way: false, limit: 0, twin: Default::default(), weekend: Default::default(), ones: vec![], fare_dist: false };
     w.apply(Op::Line { id, data: Some(d) }).unwrap();
     id
 }
@@ -1265,6 +1265,134 @@ fn a_new_line_on_full_track_gets_its_share_at_the_edit() {
             assert_eq!(w.net.line_tph[l as usize].map(f32::to_bits), at_edit[l as usize].map(f32::to_bits), "line {l} moved on an edit elsewhere");
         }
     }
+}
+
+#[test]
+fn undo_and_redo_put_back_the_rates_each_edit_moved() {
+    // T-3646: lines onto a busy line's full stretch cut it; undoing each edit gives every line's
+    // rates, trains and round trips as they were before it, to the bit, and redoing it what it gave
+    let (mut w, ns) = corridor(5);
+    terminals_at_dead_ends(&mut w);
+    let busy = line(&mut w, &ns, [8.0, 3.0, 1.0]);
+    set_counts(&mut w, busy, [40, 4, 2]);
+    let state = |w: &TrackWorld| (super::save::encode(&w.net), (0..w.net.line_count()).filter(|&l| w.net.line_ok(l as u32)).map(|l| w.svc.lines.get(l).map(|s| s.round_trip.map(f64::to_bits))).collect::<Vec<_>>());
+    let mut states = vec![state(&w)];
+    let new = new_line(&mut w, &ns[1..4], [0, 0, 0]);
+    states.push(state(&w));
+    set_counts(&mut w, new, [8, 4, 2]);
+    states.push(state(&w));
+    assert!(w.net.line_tph[new as usize][HIGH] > 0.5, "the new line runs at the peak: {:?}", w.net.line_tph[new as usize]);
+    let local = new_line(&mut w, &ns[2..5], [0, 0, 0]);
+    w.apply(Op::AutoTrains { id: local, auto: Some([300, 600, 1800]), trains: Some([0, 0, 0]) }).unwrap();
+    states.push(state(&w));
+    set_counts(&mut w, busy, [30, 4, 2]);
+    states.push(state(&w));
+    w.apply(Op::AutoTrains { id: local, auto: Some([200, 600, 1800]), trains: w.net.line_trains[local as usize] }).unwrap();
+    states.push(state(&w));
+    // an edit refused for money leaves everything as it was
+    let tph = slots_to_rows(w.net.line_tph[busy as usize]);
+    assert!(w.apply_paid(Op::TrainCounts { id: busy, trains: Some([10, 4, 2]), tph }, 0.0, false, &|_| 1e9).is_err());
+    assert!(state(&w) == states[states.len() - 1], "a refused edit lands elsewhere");
+    let n = states.len();
+    for k in (0..n - 1).rev() {
+        if k == 2 {
+            // the local line's own two edits are one step back
+            w.undo().unwrap().unwrap();
+        }
+        let was = w.net.line_tph.clone();
+        let r = w.undo().unwrap().unwrap();
+        // what is put back reaches demand
+        for l in (0..w.net.line_count()).filter(|&l| w.net.line_ok(l as u32) && was.get(l) != Some(&w.net.line_tph[l])) {
+            assert!(r.dirty.service.demand.contains(&(l as u32)), "undo to state {k}: line {l} moved but demand is not told");
+        }
+        let s = state(&w);
+        assert!(s == states[k], "undo to state {k} lands elsewhere: busy {:?}, new {:?}; the save the same {}, round trips the same {}", w.net.line_tph[busy as usize], w.net.line_tph[new as usize], s.0 == states[k].0, s.1 == states[k].1);
+    }
+    for k in 1..n {
+        w.redo().unwrap().unwrap();
+        if k == 3 {
+            w.redo().unwrap().unwrap();
+        }
+        assert!(state(&w) == states[k], "redo to state {k} lands elsewhere");
+    }
+}
+
+/// T-3646: a world's save bytes and its lines' round trips, to compare two to the bit.
+fn world_state(w: &TrackWorld) -> (Vec<u8>, Vec<Option<[u64; SLOTS]>>) {
+    (super::save::encode(&w.net), (0..w.net.line_count()).filter(|&l| w.net.line_ok(l as u32)).map(|l| w.svc.lines.get(l).map(|s| s.round_trip.map(f64::to_bits))).collect())
+}
+
+/// A busy line filling a corridor and a new line onto it with trains: (world, busy, new).
+fn full_corridor() -> (TrackWorld, u32, u32) {
+    let (mut w, ns) = corridor(5);
+    terminals_at_dead_ends(&mut w);
+    let busy = line(&mut w, &ns, [8.0, 3.0, 1.0]);
+    set_counts(&mut w, busy, [40, 4, 2]);
+    let new = new_line(&mut w, &ns[1..4], [0, 0, 0]);
+    set_counts(&mut w, new, [8, 4, 2]);
+    (w, busy, new)
+}
+
+#[test]
+fn an_edit_off_the_history_stays_through_undo_and_redo() {
+    // T-3646: the load's cap lowering (an edit on neither history, T-3528) between two edits on
+    // another line: undoing both gives what the lowering alone gives, to the bit, and redoing both
+    // what there was; an undo of an edit of the lowered line itself takes the lowering with it
+    let lower = |w: &mut TrackWorld, busy: u32| {
+        let tph = slots_to_rows(w.net.line_tph[busy as usize]);
+        w.apply_off_history(Op::TrainCounts { id: busy, trains: Some([20, 4, 2]), tph }, f64::INFINITY, &|_| 0.0, true).unwrap();
+    };
+    let (mut alone, busy, _) = full_corridor();
+    lower(&mut alone, busy);
+    let (mut w, busy, new) = full_corridor();
+    let start = world_state(&w);
+    set_counts(&mut w, new, [10, 4, 2]);
+    lower(&mut w, busy);
+    let lowered = world_state(&w);
+    set_counts(&mut w, new, [12, 5, 2]);
+    let end = world_state(&w);
+    w.undo().unwrap().unwrap();
+    assert!(world_state(&w) == lowered, "undone to the lowering");
+    w.undo().unwrap().unwrap();
+    assert!(world_state(&w) == world_state(&alone), "undone to the start with the lowering");
+    w.redo().unwrap().unwrap();
+    assert!(world_state(&w) == lowered, "redone to the lowering");
+    assert_eq!(w.net.line_trains[busy as usize], Some([20, 4, 2]));
+    w.redo().unwrap().unwrap();
+    assert!(world_state(&w) == end, "redone to the end");
+    assert!(!w.can_redo());
+    // the busy line's own edit, then its lowering: the undo gives the start
+    let (mut w, busy, _) = full_corridor();
+    set_counts(&mut w, busy, [36, 4, 2]);
+    lower(&mut w, busy);
+    w.undo().unwrap().unwrap();
+    assert!(world_state(&w) == start, "undone with the lowering of the line it set");
+    w.redo().unwrap().unwrap();
+    assert_eq!(w.net.line_trains[busy as usize], Some([20, 4, 2]), "redone with it");
+}
+
+#[test]
+fn undo_puts_back_an_edit_that_set_weekends_apart() {
+    // T-3646: an edit that makes weekends run apart (weekends settled on their own from then on,
+    // `rest_solved`), and one that ends it: undone and redone to the bit
+    let (mut w, busy, new) = full_corridor();
+    assert!(!w.net.rest_solved);
+    let before = world_state(&w);
+    let tph = slots_to_rows(w.net.line_tph[busy as usize]);
+    w.apply(Op::Batch(vec![Op::TrainCounts { id: busy, trains: Some([30, 4, 2]), tph }, Op::Weekend { id: new, weekend: Weekend { share: 50, ..Default::default() } }])).unwrap();
+    assert!(w.net.rest_solved, "weekends run apart");
+    let apart = world_state(&w);
+    w.apply(Op::Weekend { id: new, weekend: Weekend { share: 100, ..Default::default() } }).unwrap();
+    assert!(!w.net.rest_solved);
+    let together = world_state(&w);
+    w.undo().unwrap().unwrap();
+    assert!(world_state(&w) == apart, "undo back to weekends apart");
+    w.undo().unwrap().unwrap();
+    assert!(world_state(&w) == before, "undo back to before");
+    w.redo().unwrap().unwrap();
+    assert!(world_state(&w) == apart, "redo to weekends apart");
+    w.redo().unwrap().unwrap();
+    assert!(world_state(&w) == together, "redo to weekends together");
 }
 
 /// T-797: X - T - J - M, and a branch J - Br leaving towards M. From T, Br is reached only by
@@ -1760,7 +1888,7 @@ fn hsr_world(hsr: [bool; 2], fast: bool) -> (TrackWorld, u32) {
     let c = node(&mut w, 80000.0, 0.0, 0);
     for (k, (p, q)) in [(a, b), (b, c)].into_iter().enumerate() {
         let id = w.net.alloc_edge();
-        w.apply(Op::Edge { id, data: Some(EdgeData { a: p, b: q, tracks: 2, pis: vec![], built: true, off: false, thru: vec![], crossover: false, kind: TrackKind::from_hsr(hsr[k]), sep: false, day: 0, oneway: 0, join: [0; 2], limit: 0 }) }).unwrap();
+        w.apply(Op::Edge { id, data: Some(EdgeData { a: p, b: q, tracks: 2, pis: vec![], built: true, off: false, thru: vec![], crossover: false, kind: TrackKind::from_hsr(hsr[k]), sep: false, day: 0, oneway: 0, join: [0; 2], limit: 0, ramp: 0 }) }).unwrap();
     }
     station(&mut w, a, 200);
     station(&mut w, c, 200);
@@ -1836,7 +1964,7 @@ fn curves_cap_high_speed_trains_below_the_track_cap() {
     let id = w.net.alloc_edge();
     // one bend of 3,000 m radius in the middle: sqrt(1.1 x 3000) = 57.4 m/s, 207 km/h
     let pis = vec![Pi::new(40000.0, 0.0, 3000.0, 0)];
-    w.apply(Op::Edge { id, data: Some(EdgeData { a, b: c, tracks: 2, pis, built: true, off: false, thru: vec![], crossover: false, kind: TrackKind::HighSpeed, sep: false, day: 0, oneway: 0, join: [0; 2], limit: 0 }) }).unwrap();
+    w.apply(Op::Edge { id, data: Some(EdgeData { a, b: c, tracks: 2, pis, built: true, off: false, thru: vec![], crossover: false, kind: TrackKind::HighSpeed, sep: false, day: 0, oneway: 0, join: [0; 2], limit: 0, ramp: 0 }) }).unwrap();
     station(&mut w, a, 200);
     station(&mut w, c, 200);
     let l = line(&mut w, &[a, c], [4.0, 2.0, 1.0]);

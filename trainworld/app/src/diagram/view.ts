@@ -19,7 +19,8 @@ import type { MultiPolygon } from "geojson";
 import { coarseOutlines } from "../map/coarseOutlines";
 import { zonesTouching } from "../game/cities";
 import { sheetZoneBox } from "./sheet";
-import { cameraOrder, mergeParts, placeParts, regionSig, type Part, type Placed } from "./regions";
+import { cameraOrder, KM_PER_DEG, mergeParts, placeParts, REGION_JOIN_KM, regionSig, type Part, type Placed } from "./regions";
+import { cityById, isCity } from "../game/cities";
 import { placesOfZone } from "../game/placeList";
 import { EARTH_C, makeAnchor, toMerc01 } from "../map/geo";
 import { placeNameInk } from "../map/basemap";
@@ -53,6 +54,16 @@ import { dailyRiders } from "../map/trackHover";
 import { factRow, lineBullet } from "../map/trackTagRows";
 import { TAG_OFFSET_PX, tagLines } from "../map/labelLayout";
 import { ACTION_KEYS, BUS_KEY, FERRY_KEY, TOOL_KEYS, TRIP_KEY } from "../ui/toolKeys";
+import { hiddenLines, hideBuses } from "../game/lineVisibility";
+import { hidden } from "../map/visibility";
+import type { ThinIn } from "./thin";
+import { THIN_BOX_PAD } from "./busGraph";
+import { busRuns } from "./cut";
+import { stationsById, stopsById } from "../game/world";
+import { diagramCities, diagramCitiesLoads } from "../game/diagramCities";
+import { NO_CITIES } from "../workers/saveFile";
+import { stationZone } from "../game/listScope";
+import { zonesLoaded } from "../game/zones";
 
 /** station names are this many CSS px, as the map's, times the interface scale */
 const NAME_PX = 12;
@@ -74,6 +85,27 @@ export const diagramWidth = signal((() => {
     return Number.isFinite(v) && v >= WIDTH_MIN && v <= WIDTH_MAX ? v : WIDTH_MIN;
   } catch { return WIDTH_MIN; }
 })());
+/** T-3360: the kinds of line drawn (the diagram's mode buttons); kept per browser */
+export type DiagramMode = "train" | "tram" | "bus" | "ferry";
+const MODES_STORE = "anitabuilder-diagram-modes";
+export const diagramModes = signal<Record<DiagramMode, boolean>>((() => {
+  const all = { train: true, tram: true, bus: true, ferry: true };
+  try {
+    const v = JSON.parse(localStorage.getItem(MODES_STORE) ?? "null");
+    if (v && typeof v === "object") for (const k of Object.keys(all) as DiagramMode[]) if (v[k] === false) all[k] = false;
+  } catch { /* all shown */ }
+  return all;
+})());
+const ALL_MODES: Record<DiagramMode, boolean> = { train: true, tram: true, bus: true, ferry: true };
+/** the kinds of line a game has; the mode buttons show, and count, only when it has two or more */
+export function lineKinds(w: { save: { lines: { id: string }[] }; lineStats: Record<string, { bus?: { ferry?: unknown }; tram?: boolean } | undefined> } | null): Set<DiagramMode> {
+  const has = new Set<DiagramMode>();
+  for (const l of w?.save.lines ?? []) {
+    const s = w!.lineStats[l.id];
+    if (s) has.add(s.bus?.ferry ? "ferry" : s.bus ? "bus" : s.tram ? "tram" : "train");
+  }
+  return has;
+}
 export const DIAGRAM_KEY = "m";
 /** a pitch this many CSS px when the diagram first opens */
 const START_PITCH_PX = 7;
@@ -126,7 +158,7 @@ function nearestNode(s: Shown, lng: number, lat: number, among?: Iterable<number
 }
 
 /** a region laid out (T-3448): its sig, the seq it came with, its stations' keys and whether its water was asked for */
-type LaidOut = Part & { seq: number; sig: string; keys: Set<number>; water: boolean };
+type LaidOut = Part & { seq: number; sig: string; keys: Set<number>; water: boolean; frame: ZoneFrame; box: [number, number, number, number]; thinSig?: string; thinAsk?: number };
 
 /** of `among`, the node whose place in `xs`, `ys` is nearest (x, y); -1 for none */
 function nearestOf(xs: ArrayLike<number>, ys: ArrayLike<number>, x: number, y: number, among: Iterable<number>): number {
@@ -177,7 +209,10 @@ function namesOf(g: DiagramGraph): DiagramNames {
   const byId = new Map((w?.save.stations ?? []).map((s) => [s.id, s]));
   const stops = new Map<string, number>();
   for (const l of w?.save.lines ?? []) for (const s of l.stops) stops.set(s, (stops.get(s) ?? 0) + 1);
+  // T-3360: a network of buses and ferries alone has no names
+  const thinOnly = g.lines.length > 0 && g.lines.every((l) => l.bus || l.ferry);
   const text = Array.from(g.key, (key) => {
+    if (thinOnly) return "";
     const id = String(key), c = cx.of.get(id), members = c === undefined ? [id] : cx.members[c];
     return pickName(members.flatMap((m) => {
       const s = byId.get(m);
@@ -200,7 +235,8 @@ const BORDER_COLOUR = "#73798b";
 /** T-2168: the frame from mercator to graph metres, by the stations' own places (so it never depends on the
  * anchor the graph was built at), and the box of their lng, lat; null without stations */
 function zoneFrame(g: DiagramGraph): { frame: ZoneFrame; box: [number, number, number, number] } | null {
-  const byId = new Map((world.peek()?.save.stations ?? []).map((s) => [s.id, s]));
+  // T-3360: a bus stop is a node of a network with no rail near it
+  const wv = world.peek(), byId = wv ? stopsById(wv) : new Map<string, { lng: number; lat: number }>();
   const k = g.k / EARTH_C;
   let fx = 0, fy = 0, c = 0, w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
   g.key.forEach((key, i) => {
@@ -242,6 +278,8 @@ interface Shown {
   parts: LaidOut[];
   partOf: Int32Array;
   base: number[];
+  /** T-3360: a line's number to its thin lines (indices into `d.thin`) */
+  thinOf: Map<number, number[]>;
 }
 
 function indexShown(graph: DiagramGraph, d: Drawing, names: NamePlan, x: Float64Array, y: Float64Array, parts: LaidOut[], partOf: Int32Array, base: number[]): Shown {
@@ -262,21 +300,214 @@ function indexShown(graph: DiagramGraph, d: Drawing, names: NamePlan, x: Float64
     const id = String(key), c = cx.of.get(id);
     for (const m of c === undefined ? [id] : cx.members[c]) nodeOf.set(m, i);
   });
-  return { graph, d, names, x, y, drawnOf, stopping, stops, nodeOf, parts, partOf, base };
+  const thinOf = new Map<number, number[]>();
+  d.thin?.forEach((l, i) => thinOf.set(l.id, [...(thinOf.get(l.id) ?? []), i]));
+  return { graph, d, names, x, y, drawnOf, stopping, stops, nodeOf, parts, partOf, base, thinOf };
 }
 
-/** the drawn lines a selection stands for, and its station's node; null where it has none here */
-function selectedOn(s: Shown, sel: Selection): { lines: number[]; node: number } | null {
+/** the drawn lines a selection stands for, its thin lines (T-3360), and its station's node; null where it has none here */
+function selectedOn(s: Shown, sel: Selection): { lines: number[]; node: number; thin: number[] } | null {
   if (!sel) return null;
   if (sel.kind === "station") {
     const k = s.nodeOf.get(sel.station);
-    return k === undefined ? null : { lines: s.stopping[k], node: k };
+    return k === undefined ? null : { lines: s.stopping[k], node: k, thin: [] };
   }
   let nums: number[] = [];
   if (sel.kind === "line" || sel.kind === "train") nums = [Number(sel.line)];
   else if (sel.kind === "group") nums = (lineGroups(world.peek()?.save.lines ?? []).get(sel.group) ?? []).map((l) => l.num);
-  const lines = nums.flatMap((n) => s.drawnOf.get(n) ?? []);
-  return lines.length ? { lines, node: -1 } : null;
+  const lines = nums.flatMap((n) => s.drawnOf.get(n) ?? []), thin = nums.flatMap((n) => s.thinOf.get(n) ?? []);
+  return lines.length || thin.length ? { lines, node: -1, thin } : null;
+}
+
+/** T-3360, T-3785: what the mode buttons and the lines hidden on the map leave out of drawing `d` (its lines, the stations
+ * whose every line is left out, its thin lines); null when nothing is */
+function offOf(s: Shown, modes: Record<DiagramMode, boolean>, hid: ReadonlySet<number>): Pick<Drawing, "off" | "offNode" | "offThin"> | null {
+  const g = s.graph, d = s.d;
+  const kindOff = (l: { bus?: boolean; ferry?: boolean; tram?: boolean }) => !modes[l.ferry ? "ferry" : l.bus ? "bus" : l.tram ? "tram" : "train"];
+  let any = false;
+  const off = new Uint8Array(d.lineOf.length);
+  d.lineOf.forEach((li, i) => { const l = g.lines[li]; if (kindOff(l) || hid.has(l.id)) (off[i] = 1), (any = true); });
+  const offNode = new Uint8Array(g.key.length);
+  if (any) s.stopping.forEach((ls, k) => { if (ls.length && ls.every((i) => off[i])) offNode[k] = 1; });
+  const offThin = new Uint8Array(d.thin?.length ?? 0);
+  let anyThin = false;
+  d.thin?.forEach((l, i) => { if (!modes[l.ferry ? "ferry" : "bus"] || hid.has(l.id)) (offThin[i] = 1), (anyThin = true); });
+  return any || anyThin ? { ...(any ? { off, offNode } : {}), ...(anyThin ? { offThin } : {}) } : null;
+}
+
+/** T-3360: the bus and ferry lines each laid-out region draws thin, in its graph's metres: a line goes with the region
+ * holding most of its stations, else most of its stops within the region's box; a bus or ferry line the graph lays out
+ * itself (a network with no rail near it) is not one */
+/** T-3409: the station nodes and bus stops (ids apart: a bus stop's can be a station's) in the chosen cities */
+type Inside = { stations: ReadonlySet<number>; stops: ReadonlySet<number> };
+
+function thinInputs(parts: readonly LaidOut[], inside: Inside | null): ThinIn[][] {
+  const w = world.peek(), out: ThinIn[][] = parts.map(() => []);
+  if (!w || !parts.length) return out;
+  const inGraph = new Set<number>();
+  for (const p of parts) for (const l of p.graph.lines) if (l.bus || l.ferry) inGraph.add(l.id);
+  const cx = complexes.peek();
+  /** per part, a station id to its node */
+  const nodeOf = parts.map((p) => {
+    const m = new Map<string, number>();
+    p.graph.key.forEach((key, i) => {
+      const id = String(key), c = cx.of.get(id);
+      for (const s of c === undefined ? [id] : cx.members[c]) m.set(s, i);
+    });
+    return m;
+  });
+  for (const l of w.save.lines) {
+    const st = w.lineStats[l.id], b0 = st?.bus;
+    if (!b0 || st.status === "broken" || inGraph.has(l.num) || b0.stops.length < 2) continue;
+    // T-3409: with cities chosen, each run of its stops inside them, cut there with a stub
+    const runs = inside ? busRuns(b0, (s) => (s.station >= 0 ? inside.stations.has(s.station) : inside.stops.has(s.id))) : "all";
+    for (const r of runs === "all" ? [{ stops: b0.stops, routeLL: b0.routeLL }] : runs) {
+      const b = { ...b0, stops: r.stops, routeLL: r.routeLL }, stub = { ...("cutA" in r && r.cutA ? { stubA: r.cutA } : {}), ...("cutB" in r && r.cutB ? { stubB: r.cutB } : {}) };
+      let best = -1, score = 0;
+      parts.forEach((p, pi) => {
+        let at = 0, inBox = 0;
+        const [x0, y0, x1, y1] = p.box;
+        for (const s of b.stops) {
+          if (s.station >= 0 && nodeOf[pi].has(String(s.station))) at++;
+          if (s.lng >= x0 - THIN_BOX_PAD && s.lng <= x1 + THIN_BOX_PAD && s.lat >= y0 - THIN_BOX_PAD && s.lat <= y1 + THIN_BOX_PAD) inBox++;
+        }
+        const sc = at * 1e4 + inBox;
+        if (sc > score) (score = sc), (best = pi);
+      });
+      if (best < 0) continue;
+      const [fx, fy, k] = parts[best].frame;
+      const xy = (lng: number, lat: number): [number, number] => { const [mx, my] = toMerc01(lng, lat); return [(mx - fx) * k, -(my - fy) * k]; };
+      const route = new Float64Array(b.routeLL.length);
+      for (let i = 0; i + 1 < b.routeLL.length; i += 2) [route[i], route[i + 1]] = xy(b.routeLL[i], b.routeLL[i + 1]);
+      const stops = new Float64Array(b.stops.length * 2), node = new Int32Array(b.stops.length);
+      b.stops.forEach((s, i) => {
+        [stops[2 * i], stops[2 * i + 1]] = xy(s.lng, s.lat);
+        node[i] = s.station >= 0 ? nodeOf[best].get(String(s.station)) ?? -1 : -1;
+        // a port beside a station drawn here meets its pill (the Staten Island Ferry at South Ferry and St. George)
+        if (node[i] < 0 && b.ferry) {
+          const g = parts[best].graph;
+          let bd = PORT_STATION_M ** 2;
+          for (let q = 0; q < g.key.length; q++) {
+            const dd = (g.x[q] - stops[2 * i]) ** 2 + (g.y[q] - stops[2 * i + 1]) ** 2;
+            if (dd < bd) (bd = dd), (node[i] = q);
+          }
+        }
+      });
+      out[best].push({ id: l.num, colour: l.colour.toLowerCase(), ferry: !!b.ferry, route, stops, node, ...stub });
+    }
+  }
+  return out;
+}
+
+/** a ferry port this near a station drawn on the diagram (m) is drawn at its pill */
+const PORT_STATION_M = 400;
+
+/** a string that changes when a region's thin lines do */
+function thinSig(ins: readonly ThinIn[]): string {
+  let h = 0x811c9dc5;
+  const add = (v: number) => (h = Math.imul(h ^ (Math.round(v * 100) | 0), 16777619));
+  for (const l of ins) {
+    add(l.id), add(l.ferry ? 1 : 0);
+    for (let i = 0; i < l.colour.length; i++) add(l.colour.charCodeAt(i));
+    for (const a of [l.route, l.stops, l.node, l.stubA ?? [], l.stubB ?? []]) { add(a.length); for (let i = 0; i < a.length; i++) add(a[i]); }
+  }
+  return `${ins.length}:${h >>> 0}`;
+}
+
+/** T-3826: a city that a click beside the drawing adds to the chosen ones, at its spot in the drawing's units */
+type Ghost = { zone: string; x: number; y: number; /** for checks: how far past the box the fit alone would put it, in box sides */ raw?: number };
+/** a ghost sits this far past the drawn box: this share of the box's larger side, plus GHOST_PITCHES pitches */
+const GHOST_OUT = 0.06, GHOST_PITCHES = 3;
+/** the ghost's circle (CSS px across, the realm buttons' size) and how near the pointer must come to it */
+const GHOST_PX = 16, GHOST_HIT_PX = 40;
+
+/** T-3826: the cities with the player's stations or stops that are not chosen and have one within REGION_JOIN_KM of a
+ * station drawn, each placed beside the drawing the way it lies from the drawn station nearest it: the ground offset turned
+ * as the layout turns the region round it (a similarity fitted over its nodes), carried to just past the drawn box (the
+ * layout stretches dense cores many times over, so the real distance would put a neighbour out of reach) */
+function ghostsOf(s: Shown, chosen: readonly string[]): Ghost[] {
+  const w = world.peek();
+  if (!w || !chosen.length) return [];
+  const want = new Set(chosen), byZone = new Map<string, { lng: number; lat: number }[]>();
+  const add = (z: string | null, p: { lng: number; lat: number }) => { if (z && isCity(z) && !want.has(z)) byZone.set(z, [...(byZone.get(z) ?? []), p]); };
+  for (const st of w.save.stations) if (st.built) add(stationZone(st), st);
+  for (const st of Object.values(w.lineStats)) for (const p of st.bus?.stops ?? []) if (p.station < 0) add(stationZone({ id: `bus ${p.id}`, lng: p.lng, lat: p.lat }), p);
+  if (!byZone.size) return [];
+  const all = stopsById(w), nodes: { k: number; lng: number; lat: number }[] = [];
+  s.graph.key.forEach((key, k) => { const st = all.get(String(key)); if (st) nodes.push({ k, lng: st.lng, lat: st.lat }); });
+  if (!nodes.length) return [];
+  const b = s.d.box, side = Math.max(b[2] - b[0], b[3] - b[1]), out = GHOST_OUT * side + GHOST_PITCHES * s.d.pitch;
+  const fits = new Map<number, ReturnType<typeof similarity>>();
+  const ghosts: Ghost[] = [];
+  for (const [zone, pts] of byZone) {
+    // the drawn station nearest any of the city's, by ground
+    let best = -1, bd = Infinity;
+    for (const p of pts) {
+      const cos = Math.cos((p.lat * Math.PI) / 180);
+      for (const n of nodes) {
+        const d = ((n.lng - p.lng) * cos) ** 2 + (n.lat - p.lat) ** 2;
+        if (d < bd) (bd = d), (best = n.k);
+      }
+    }
+    if (best < 0 || Math.sqrt(bd) * KM_PER_DEG > REGION_JOIN_KM) continue;
+    const part = s.partOf[best], g = s.parts[part].graph;
+    let fit = fits.get(part);
+    if (!fit) fits.set(part, (fit = similarity(s, part)));
+    // the city's middle in the region's ground units, as nearestNode measures
+    const lng = pts.reduce((a, p) => a + p.lng, 0) / pts.length, lat = pts.reduce((a, p) => a + p.lat, 0) / pts.length;
+    const [lx, ly] = toLocal(lng, lat, makeAnchor(g.origin[0], g.origin[1], 0));
+    const i = best - s.base[part], ux = (lx - g.mid[0]) / g.k - g.x[i], uy = -(ly - g.mid[1]) / g.k - g.y[i];
+    const vy0 = fit.flip ? -uy : uy, dx = fit.c * ux - fit.s * vy0, dy = fit.s * ux + fit.c * vy0, len = Math.hypot(dx, dy);
+    if (!(len > 0)) continue;
+    // along that way from the drawn station, out to the box grown by `out`, or as far as the fit puts it if that is nearer
+    const ax = s.x[best], ay = s.y[best], ex = dx / len, ey = dy / len;
+    const toEdge = (lo: number, hi: number, a: number, e: number) => (e > 0 ? (hi - a) / e : e < 0 ? (lo - a) / e : Infinity);
+    const edge = Math.min(toEdge(b[0] - out, b[2] + out, ax, ex), toEdge(b[1] - out, b[3] + out, ay, ey));
+    let t = Math.min(edge, Math.max(fit.scale * len, out));
+    // clear of every drawn station by `out`, stepping on past the drawing where it is not
+    for (let step = 0; step < 200; step++) {
+      const x = ax + ex * t, y = ay + ey * t;
+      let near = false;
+      for (let k = 0; k < s.x.length && !near; k++) near = (s.x[k] - x) ** 2 + (s.y[k] - y) ** 2 < out * out;
+      if (!near) break;
+      t += out / 2;
+    }
+    ghosts.push({ zone, x: ax + ex * t, y: ay + ey * t, raw: (fit.scale * len - (edge - out)) / side });
+  }
+  // two ghosts that would overlap: the later moved aside, across its way out
+  for (let i = 1; i < ghosts.length; i++) {
+    for (let j = 0; j < i; j++) {
+      const a = ghosts[i], o = ghosts[j], d = Math.hypot(a.x - o.x, a.y - o.y);
+      if (d >= out) continue;
+      const nx = d > 0 ? (a.x - o.x) / d : 1, ny = d > 0 ? (a.y - o.y) / d : 0;
+      (a.x = o.x + nx * out), (a.y = o.y + ny * out);
+    }
+  }
+  return ghosts;
+}
+
+/** the turn, scale and mirroring that best take a region's ground places (its graph's x, y) to its drawn ones */
+function similarity(s: Shown, part: number): { c: number; s: number; scale: number; flip: boolean } {
+  const g = s.parts[part].graph, base = s.base[part], n = g.key.length;
+  let gx = 0, gy = 0, vx = 0, vy = 0;
+  for (let i = 0; i < n; i++) (gx += g.x[i] / n), (gy += g.y[i] / n), (vx += s.x[base + i] / n), (vy += s.y[base + i] / n);
+  const fit = (flip: boolean) => {
+    let re = 0, im = 0, uu = 0;
+    for (let i = 0; i < n; i++) {
+      const ux = g.x[i] - gx, uy = (flip ? -1 : 1) * (g.y[i] - gy), px = s.x[base + i] - vx, py = s.y[base + i] - vy;
+      // conj(u) * v
+      (re += ux * px + uy * py), (im += ux * py - uy * px), (uu += ux * ux + uy * uy);
+    }
+    const ar = uu ? re / uu : 1, ai = uu ? im / uu : 0, m = Math.hypot(ar, ai) || 1;
+    let err = 0;
+    for (let i = 0; i < n; i++) {
+      const ux = g.x[i] - gx, uy = (flip ? -1 : 1) * (g.y[i] - gy);
+      err += (ar * ux - ai * uy - (s.x[base + i] - vx)) ** 2 + (ai * ux + ar * uy - (s.y[base + i] - vy)) ** 2;
+    }
+    return { c: ar / m, s: ai / m, scale: m, flip, err };
+  };
+  const a = fit(false), b = fit(true);
+  return a.err <= b.err ? a : b;
 }
 
 /** the nodes a selection's lines stop at, or its station */
@@ -296,7 +527,8 @@ function lineTag(l: LineInput, s: Shown, drawn: number, at: number): TipLine[] {
   if (!dv) return [name];
   // the stretch: the stops the line has made up to the last node passed, less one
   const gl = s.graph.lines[s.d.lineOf[drawn]], c = s.d.chainAt[drawn][at] ?? 0;
-  let k = -1;
+  // T-3409: a run of a line cut to the chosen cities counts from its first stop's place in the line
+  let k = -1 + (gl.from ?? 0);
   for (let j = 0; j <= c && j < gl.stop.length; j++) k += gl.stop[j];
   k = Math.max(0, Math.min(l.stops.length - 2, k));
   const purpose = purposeFilter.peek();
@@ -328,6 +560,7 @@ export function startDiagramView(client: ClockClient, mapEl: HTMLElement): void 
   const hideTag = () => {
     if (tagShown) (tag.style.display = "none"), (tagShown = false);
     if (hot >= 0) (hot = -1), draw();
+    if (ghostHot) (ghostHot = null), draw();
   };
   let lastGraphs: DiagramGraph[] | null = null;
   // T-3448: the network by region (regions.ts), each laid out on its own sheet, the region round the camera first and then
@@ -340,31 +573,118 @@ export function startDiagramView(client: ClockClient, mapEl: HTMLElement): void 
   /** the regions laid out, by their sig: the plan's, and old ones drawn until the region that replaces them is */
   const parts = new Map<string, LaidOut>();
   /** per layout asked for, its region's sig and whether its water was asked for */
-  const sigOfSeq = new Map<number, { sig: string; water: boolean }>();
-  const send = (graphs: DiagramGraph[]) => {
-    lastGraphs = graphs;
-    const c = live.map?.getCenter(), water = diagramWater.peek();
-    plan = [];
+  const sigOfSeq = new Map<number, { sig: string; water: boolean; frame: ZoneFrame; box: [number, number, number, number] }>();
+  /** T-3409: whether what is shown is of chosen cities alone; the sigs of the whole network's regions, whose layouts are
+   * kept while cities are chosen (so going back to the whole network lays nothing out when it has not changed); and the
+   * whole network's regions a share waits for while cities are chosen */
+  let cutNow = false, keepSigs = new Set<string>(), wholePlan: Planned[] | null = null;
+  /** the stations and stops in the chosen cities, as last told to the clock worker (the buses drawn thin are cut by them) */
+  let inside: Inside | null = null;
+  const planOf = (graphs: DiagramGraph[]): Planned[] => {
+    const c = live.map?.getCenter(), out: Planned[] = [];
     for (const g of c ? cameraOrder(graphs, c.lng, c.lat) : graphs) {
       const zf = zoneFrame(g);
       // a region with no station in the save has nothing to draw
       if (!zf) continue;
       const names = namesOf(g);
-      plan.push({ sig: regionSig(g, names.text, names.width, ""), graph: g, names, frame: zf.frame, box: zf.box });
+      out.push({ sig: regionSig(g, names.text, names.width, ""), graph: g, names, frame: zf.frame, box: zf.box });
     }
+    return out;
+  };
+  /** the whole network's regions a share waits for, laid out after what is shown */
+  const queueWhole = () => {
+    if (!wholePlan || !forShare.length) return;
+    for (const p of wholePlan) if (!parts.has(p.sig) && !queue.some((q) => q.sig === p.sig)) queue.push(p);
+  };
+  const send = (graphs: DiagramGraph[], cut = cutNow) => {
+    lastGraphs = graphs;
+    cutNow = cut;
+    if (choice === "asked") (choice = "laying"), (fitChoice = true);
+    const water = diagramWater.peek();
+    plan = planOf(graphs);
+    if (!cut) keepSigs = new Set(plan.map((p) => p.sig));
     queue = plan.filter((p) => { const had = parts.get(p.sig); return !had || (water && !had.water); });
+    queueWhole();
     lastBoxes = plan.map((p) => p.box);
     if (!queue.length) compose();
     pump();
   };
+  /** a share's answer once what it waits for is laid out: what is shown, or with cities chosen the whole network */
+  const shareReady = () => {
+    if (!forShare.length) return;
+    if (!cutNow) return giveShare(shown);
+    if (!wholePlan || wholePlan.some((p) => !parts.has(p.sig))) return;
+    const list = wholePlan.map((p) => parts.get(p.sig)!);
+    if (!list.length) return giveShare(null);
+    const m = mergeParts(list, placeParts(list, 0));
+    giveShare(indexShown(m.graph, m.d, m.names, m.x, m.y, list, m.partOf, m.base));
+  };
+  /** T-3812: the share of the last layout's progress, for the indicator while regions are still to come */
+  let layoutShare = 0;
+  /** the indicator: up until every region of the plan is drawn (or covered by an older drawing of its stations, so an
+   * edit's re-layout shows none); its bar is the regions done plus the one being laid out */
+  const drawingShare = () => {
+    if (!diagramShown.peek()) return;
+    // T-3825: after the cities change, every region of the new plan counts until it is laid out, though the old drawing covers it
+    if (choice === "asked") return void (diagramProgress.value = 0);
+    const left = plan.filter((p) => !parts.has(p.sig) && (choice === "laying" || !drawnParts.some((q) => p.graph.key.some((k) => q.keys.has(k))))).length;
+    if (!left && choice === "laying") choice = null;
+    diagramProgress.value = left ? Math.min(1, (plan.length - left + layoutShare) / plan.length) : null;
+  };
+  /** T-3825: the cities chosen changed: "asked" until the clock worker's graphs for them come, then "laying" until every
+   * region of them is drawn; the camera fits the new drawing meanwhile unless the player moves it */
+  let choice: "asked" | "laying" | null = null, fitChoice = false;
+  /** T-3812, T-3825: no zooming out past where the larger side of what is drawn is half the view's matching side; the
+   * camera can still fit the whole drawing */
+  const MIN_SHARE = 0.5;
+  const minScale = (): number => {
+    const b = shown?.d.box, r = canvas.getBoundingClientRect();
+    if (!b || !r.width || !r.height) return 0;
+    return Math.min((MIN_SHARE * r.width) / Math.max(b[2] - b[0], 1e-6), (MIN_SHARE * r.height) / Math.max(b[3] - b[1], 1e-6));
+  };
+  const clampScale = () => {
+    if (scale) scale = Math.max(scale, minScale());
+  };
+  /** T-3825: the view's middle stays on the drawn box, and the station nearest it at least KEEP_IN_PX inside the view, so
+   * some of the drawing is always in view at any zoom (all of it at the zoom-out cap) */
+  const KEEP_IN_PX = 40;
+  const clampView = () => {
+    const s = shown, b = s?.d.box;
+    if (!s || !b || !scale) return;
+    (cx = Math.min(Math.max(cx, b[0]), b[2])), (cy = Math.min(Math.max(cy, b[1]), b[3]));
+    const k = nearestOf(s.x, s.y, cx, cy, s.graph.key.keys());
+    if (k < 0) return;
+    const hx = Math.max(0, canvas.clientWidth / 2 - KEEP_IN_PX) / scale, hy = Math.max(0, canvas.clientHeight / 2 - KEEP_IN_PX) / scale;
+    (cx = Math.min(Math.max(cx, s.x[k] - hx), s.x[k] + hx)), (cy = Math.min(Math.max(cy, s.y[k] - hy), s.y[k] + hy));
+  };
+  /** T-3825: the whole drawing in view, at most at the pitch the diagram opens at */
+  const fitView = () => {
+    const s = shown, r = canvas.getBoundingClientRect();
+    if (!s || !r.width || !r.height) return;
+    // T-3826: the cities a click beside the drawing adds are in view too
+    const b = [...s.d.box];
+    for (const g of ghostsNow()) (b[0] = Math.min(b[0], g.x)), (b[1] = Math.min(b[1], g.y)), (b[2] = Math.max(b[2], g.x)), (b[3] = Math.max(b[3], g.y));
+    const fit = 0.9 * Math.min(r.width / Math.max(b[2] - b[0], 1e-6), r.height / Math.max(b[3] - b[1], 1e-6));
+    scale = Math.min(fit, Math.max(START_PITCH_PX / s.d.pitch, minScale()));
+    (cx = (b[0] + b[2]) / 2), (cy = (b[1] + b[3]) / 2);
+  };
+  /** T-3826: the cities a click beside the drawing adds, worked out once per drawing and choice; the one under the pointer */
+  let ghostKey: [Shown, readonly string[]] | null = null, ghostList: Ghost[] = [], ghostHot: Ghost | null = null;
+  const ghostsNow = (): Ghost[] => {
+    const s = shown, chosen = diagramCities.peek();
+    // none while an older drawing stands in for the choice's (its stations are not the chosen cities')
+    if (!s || !cutNow || !chosen.length || !drawnParts.every((p) => plan.some((q) => q.sig === p.sig))) return [];
+    if (!ghostKey || ghostKey[0] !== s || ghostKey[1] !== chosen) (ghostKey = [s, chosen]), (ghostList = ghostsOf(s, chosen));
+    return ghostList;
+  };
   const pump = () => {
     if (busy) return;
     const next = queue.shift();
-    if (!next) return void giveShare(shown);
+    if (!next) return void shareReady();
     busy = true;
     // the rubber sheet (T-2568, T-2580), from the water masks of the zones its box meets (T-2591)
     const sheet = { packs: DATA_BASE, zones: zonesTouching(...sheetZoneBox(next.box)).map((c) => c.id), ...(perfOff("carryWasm") ? { carryJs: true } : {}) };
-    sigOfSeq.set(++seq, { sig: next.sig, water: diagramWater.peek() });
+    sigOfSeq.set(++seq, { sig: next.sig, water: diagramWater.peek(), frame: next.frame, box: next.box });
     worker!.postMessage({ kind: "graph", graph: next.graph, names: next.names, seq, frame: next.frame, zones: newZones(next.box), water: diagramWater.peek(), sheet, keep: [...parts.values()].map((p) => p.seq) } satisfies ToDiagram);
   };
   /** the parts drawn and how each is placed, as last composed */
@@ -382,9 +702,13 @@ export function startDiagramView(client: ClockClient, mapEl: HTMLElement): void 
       if (inPlan.has(sig)) continue;
       const covered = list.some((p) => p.graph.key.some((k) => q.keys.has(k)));
       if (!covered && waitingFor.some((p) => p.graph.key.some((k) => q.keys.has(k)))) list.push(q);
-      else parts.delete(sig);
+      else if (!keepSigs.has(sig)) parts.delete(sig);
     }
-    if (!list.length) return;
+    if (!list.length) {
+      // T-3886: no city chosen sends no graph at all: an empty sheet
+      if (!plan.length) (drawnParts = []), (drawnAt = []), (shown = null), (hot = -1), (ghostHot = null), (diagramReady.value = false), (choice = null), (fitChoice = false), (diagramProgress.value = null), draw();
+      return;
+    }
     // the view stays on the region it is on: that region is placed as it is laid out, the others round it
     let anchor = 0;
     const was = shown;
@@ -403,11 +727,39 @@ export function startDiagramView(client: ClockClient, mapEl: HTMLElement): void 
     drawnAt = at;
     shown = indexShown(m.graph, m.d, m.names, m.x, m.y, list, m.partOf, m.base);
     focusKey = null;
-    hot = -1;
-    diagramProgress.value = null;
+    (hot = -1), (ghostHot = null);
     diagramReady.value = true;
     if (!placed) place();
+    else clampScale();
+    // T-3825: the new choice's drawing fitted as it comes, not the older drawing standing in for it
+    if (fitChoice && list.every((p) => inPlan.has(p.sig))) fitView();
+    drawingShare();
+    if (!choice) fitChoice = false;
     draw();
+    askThin(list);
+  };
+  // T-3360: each region's bus and ferry lines, fitted by the layout worker into the layout it already has, asked again
+  // only when they change
+  let thinAsks = 0;
+  const askThin = (list: LaidOut[]) => {
+    if (!worker) return;
+    const ins = thinInputs(list, cutNow ? inside : null);
+    list.forEach((p, i) => {
+      const sig = thinSig(ins[i]);
+      if (sig === p.thinSig) return;
+      (p.thinSig = sig), (p.thinAsk = ++thinAsks);
+      worker!.postMessage({ kind: "thin", seq: p.seq, lines: ins[i], ask: p.thinAsk } satisfies ToDiagram);
+    });
+  };
+  /** what the mode buttons and hidden lines leave out of what is shown, kept while they and the drawing are the same */
+  let offKey: [Shown, Record<DiagramMode, boolean>, number] | null = null, offNow: ReturnType<typeof offOf> = null;
+  const masked = (d: Drawing): Drawing => {
+    const s = shown;
+    if (!s) return d;
+    // a mode set in another game counts only while its button shows
+    const modes = lineKinds(world.peek()).size < 2 ? ALL_MODES : diagramModes.peek();
+    if (!offKey || offKey[0] !== s || offKey[1] !== modes || offKey[2] !== hidden.v) (offKey = [s, modes, hidden.v]), (offNow = offOf(s, modes, hidden.lines));
+    return offNow ? { ...d, ...offNow } : d;
   };
   /** the part a message from the worker is for */
   const partOfSeq = (s: number): LaidOut | undefined => {
@@ -463,18 +815,52 @@ export function startDiagramView(client: ClockClient, mapEl: HTMLElement): void 
     forShare = [];
     clearTimeout(shareTimer);
     diagramShareProgress.value = null;
-    if (!diagramShown.peek()) client.post({ kind: "diagram", on: false });
+    wholePlan = null;
+    // the whole network's graphs no longer wanted
+    client.post({ kind: "diagram", on: diagramShown.peek() });
     for (const f of waiters) f(s);
   };
   sharer = () => new Promise((done) => {
     const reply = (s: Shown | null) => done(s && { d: s.d, names: s.names });
-    if (diagramShown.peek() && shown && !busy && !queue.length) return reply(shown);
+    if (diagramShown.peek() && shown && !busy && !queue.length && !cutNow) return reply(shown);
     forShare.push(reply);
     if (forShare.length > 1) return;
     shareTimer = window.setTimeout(() => giveShare(null), SHARE_WAIT_MS);
-    if (!diagramShown.peek()) client.post({ kind: "diagram", on: true });
+    // T-3409: a share is of the whole network, whatever cities the diagram shows
+    syncCut();
+    client.post({ kind: "diagram", on: true, whole: true });
   });
-  client.onDiagram = (gs) => {
+  // T-3409: the clock worker is told which stations and stops the chosen cities have, again as they change
+  let cutPosted = "", loadsSeen = -1;
+  const syncCut = () => {
+    const cities = diagramCities.peek(), w = world.peek(), stations: number[] = [], stops: number[] = [];
+    if (cities.length && w) {
+      const want = new Set(cities), seen = new Set<number>();
+      for (const s of w.save.stations) { const z = stationZone(s); if (z && want.has(z)) stations.push(Number(s.id)); }
+      // a bus stop's id can be a station's too: placed under an id of its own
+      for (const st of Object.values(w.lineStats)) for (const p of st.bus?.stops ?? []) {
+        if (p.station >= 0 || seen.has(p.id)) continue;
+        seen.add(p.id);
+        const z = stationZone({ id: `bus ${p.id}`, lng: p.lng, lat: p.lat });
+        if (z && want.has(z)) stops.push(p.id);
+      }
+    }
+    const key = `${cities.join()}|${stations.join()}|${stops.join()}`;
+    if (key === cutPosted) return;
+    // T-3825: a change of cities (not a load's or an edit's new stations) shows the indicator until it is drawn
+    if (cutPosted && cutPosted.split("|")[0] !== cities.join() && diagramShown.peek() && shown) (choice = "asked"), drawingShare();
+    cutPosted = key;
+    inside = cities.length ? { stations: new Set(stations), stops: new Set(stops) } : null;
+    client.post({ kind: "diagramCut", cities: [...cities], stations, stops });
+  };
+  effect(() => {
+    const loads = diagramCitiesLoads.value;
+    void diagramCities.value, world.value, zonesLoaded.value;
+    // a load's clock worker has no stations for the choice yet
+    if (loads !== loadsSeen) (loadsSeen = loads), (cutPosted = "");
+    if (diagramShown.peek()) syncCut();
+  });
+  client.onDiagram = (gs, cut, whole) => {
     if (!diagramShown.peek() && !forShare.length) return;
     // for checks (t2261-graph-anchor.mjs): the graphs as the clock worker posts them, counted
     const w = window as unknown as { twGraphs?: { n: number; graphs: DiagramGraph[] } };
@@ -484,13 +870,23 @@ export function startDiagramView(client: ClockClient, mapEl: HTMLElement): void 
       worker.addEventListener("error", (e) => { if (!e.message) noteStaleBuild(); giveShare(null); }); // no message: its script did not load
       worker.onmessage = (e: MessageEvent<FromDiagram>) => {
         if (e.data.kind === "progress") {
-          if (!shown && diagramShown.peek()) diagramProgress.value = e.data.share;
+          if (diagramShown.peek()) {
+            if (!shown) diagramProgress.value = e.data.share;
+            else (layoutShare = e.data.share), drawingShare();
+          }
           if (forShare.length) diagramShareProgress.value = e.data.share;
           return;
         }
         if (e.data.kind === "water") {
           const p = partOfSeq(e.data.seq);
           if (p && diagramWater.peek()) (p.d.water = e.data.water), compose();
+          return;
+        }
+        if (e.data.kind === "thin") {
+          const p = partOfSeq(e.data.seq);
+          // for checks: how long the last fit took and how many lines it drew
+          (window as unknown as { twThin: unknown }).twThin = { ms: e.data.ms, n: e.data.thin.length };
+          if (p && p.thinAsk === e.data.ask) (p.d.thin = e.data.thin.length ? e.data.thin : undefined), compose();
           return;
         }
         if (e.data.kind === "sheet") {
@@ -505,18 +901,27 @@ export function startDiagramView(client: ClockClient, mapEl: HTMLElement): void 
           return;
         }
         busy = false;
+        layoutShare = 0;
         const { graph, layout, drawing: d, names } = e.data, asked = sigOfSeq.get(e.data.seq);
         sigOfSeq.delete(e.data.seq);
-        if (asked) parts.set(asked.sig, { graph, x: layout.x, y: layout.y, d, names, seq: e.data.seq, sig: asked.sig, keys: new Set(graph.key), water: asked.water });
+        if (asked) parts.set(asked.sig, { graph, x: layout.x, y: layout.y, d, names, seq: e.data.seq, sig: asked.sig, keys: new Set(graph.key), water: asked.water, frame: asked.frame, box: asked.box });
         compose();
         const s = shown;
         // for checks and `?debug=1`: the last layout's figures and how to frame a station
-        if (s) (window as unknown as { twDiagram: unknown }).twDiagram = { layouts: e.data.seq, regions: drawnParts.length, ms: { ...layout.ms, ...e.data.ms }, complexes: s.graph.key.length, pieces: layout.pieces.length, names: s.names.at.map((l, i) => [s.names.levels[i], l.node.length]), cities: () => { const c = shown?.names.cities; return c ? [...c.order].map((b) => c.text[b]) : null; }, look: (fx: number, fy: number, pitchPx: number) => { const b = shown!.d.box; (cx = b[0] + (b[2] - b[0]) * fx), (cy = b[1] + (b[3] - b[1]) * fy), (scale = pitchPx / shown!.d.pitch), draw(); }, centreOn: (name: string, pitchPx: number) => { const i = nodeNamed(name); if (i < 0) return false; (cx = shown!.x[i]), (cy = shown!.y[i]), (scale = pitchPx / shown!.d.pitch), draw(); return true; }, centre: (lng: number, lat: number, pitchPx: number) => { const i = nearestNode(shown!, lng, lat); (cx = shown!.x[i]), (cy = shown!.y[i]), (scale = pitchPx / shown!.d.pitch), draw(); }, borders: (on?: boolean) => { const b = shown?.d.borders; if (on === false && b) (b.cmds = new Float64Array(0)), (b.path = undefined), draw(); return b ? b.cmds.length : -1; }, bench: (k: number) => { const t = performance.now(); for (let j = 0; j < k; j++) paintNow(); return (performance.now() - t) / k; }, where: (name: string) => whereOf(nodeNamed(name)), linePoint, middle: () => { const s = shown!; const i = nearestOf(s.x, s.y, cx, cy, s.graph.key.keys()); return s.names.text[i]; }, pitchPx: () => scale * shown!.d.pitch, box: () => [...shown!.d.box], pitch: () => shown!.d.pitch };
+        if (s) (window as unknown as { twDiagram: unknown }).twDiagram = { layouts: e.data.seq, regions: drawnParts.length, ms: { ...layout.ms, ...e.data.ms }, complexes: s.graph.key.length, pieces: layout.pieces.length, names: s.names.at.map((l, i) => [s.names.levels[i], l.node.length]), cities: () => { const c = shown?.names.cities; return c ? [...c.order].map((b) => c.text[b]) : null; }, look: (fx: number, fy: number, pitchPx: number) => { const b = shown!.d.box; (cx = b[0] + (b[2] - b[0]) * fx), (cy = b[1] + (b[3] - b[1]) * fy), (scale = pitchPx / shown!.d.pitch), draw(); }, centreOn: (name: string, pitchPx: number) => { const i = nodeNamed(name); if (i < 0) return false; (cx = shown!.x[i]), (cy = shown!.y[i]), (scale = pitchPx / shown!.d.pitch), draw(); return true; }, centre: (lng: number, lat: number, pitchPx: number) => { const i = nearestNode(shown!, lng, lat); (cx = shown!.x[i]), (cy = shown!.y[i]), (scale = pitchPx / shown!.d.pitch), draw(); }, borders: (on?: boolean) => { const b = shown?.d.borders; if (on === false && b) (b.cmds = new Float64Array(0)), (b.path = undefined), draw(); return b ? b.cmds.length : -1; }, bench: (k: number) => { const t = performance.now(); for (let j = 0; j < k; j++) paintNow(); return (performance.now() - t) / k; }, where: (name: string) => whereOf(nodeNamed(name)), linePoint, middle: () => { const s = shown!; const i = nearestOf(s.x, s.y, cx, cy, s.graph.key.keys()); return s.names.text[i]; }, pitchPx: () => scale * shown!.d.pitch, box: () => [...shown!.d.box], pitch: () => shown!.d.pitch, ghosts: () => { const r = canvas.getBoundingClientRect(); return ghostsNow().map((g) => ({ zone: g.zone, raw: g.raw, at: [r.left + r.width / 2 + (g.x - cx) * scale, r.top + r.height / 2 - (g.y - cy) * scale] })); } };
         wantTowns(names.cities?.want);
         pump();
       };
     }
-    send(gs);
+    if (whole && forShare.length) {
+      wholePlan = planOf(whole);
+      keepSigs = new Set(wholePlan.map((p) => p.sig));
+    }
+    if (diagramShown.peek() || !cut) return send(gs, cut);
+    // a share with the diagram down and cities chosen: the whole network alone
+    cutNow = true;
+    queueWhole();
+    pump();
   };
   /** the node of the station with this name, the one most lines stop at; -1 for none */
   const nodeNamed = (name: string): number => {
@@ -558,21 +963,26 @@ export function startDiagramView(client: ClockClient, mapEl: HTMLElement): void 
     if (!s) return;
     if (!placed) scale = START_PITCH_PX / s.d.pitch;
     placed = true;
+    clampScale();
     const c = live.map?.getCenter();
     const on = selectedOn(s, selection.peek());
-    const among = on ? selectedNodes(s, on) : undefined;
+    // a bus or ferry line drawn thin has no nodes: the complex nearest the map's centre
+    const nodes = on ? selectedNodes(s, on) : [], among = nodes.length ? nodes : undefined;
     const best = c ? nearestNode(s, c.lng, c.lat, among) : among?.[0] ?? 0;
     cx = s.x[best] ?? 0;
     cy = s.y[best] ?? 0;
+    // T-3825: a drawing that fits in the view (a small network, at least half the view at the zoom-out limit) is centred whole
+    const b = s.d.box;
+    if ((b[2] - b[0]) * scale <= canvas.clientWidth && (b[3] - b[1]) * scale <= canvas.clientHeight) (cx = (b[0] + b[2]) / 2), (cy = (b[1] + b[3]) / 2);
     moved = false;
   };
   /** the map centred on the selection's node nearest the diagram's middle, or the complex nearest it */
   const back = () => {
     const s = shown, map = live.map;
     if (!s || !map || !moved) return;
-    const on = selectedOn(s, selection.peek());
-    const k = nearestOf(s.x, s.y, cx, cy, on ? selectedNodes(s, on) : s.graph.key.keys());
-    const st = world.peek()?.save.stations.find((x) => x.id === String(s.graph.key[k]));
+    const on = selectedOn(s, selection.peek()), nodes = on ? selectedNodes(s, on) : [];
+    const k = nearestOf(s.x, s.y, cx, cy, nodes.length ? nodes : s.graph.key.keys());
+    const w = world.peek(), st = w && stopsById(w).get(String(s.graph.key[k]));
     if (!st) return;
     map.jumpTo({ center: [st.lng, st.lat] });
     activeCity.value = zoneAt(st.lng, st.lat);
@@ -587,13 +997,14 @@ export function startDiagramView(client: ClockClient, mapEl: HTMLElement): void 
     focusKey = [sel, hot];
     const on = selectedOn(s, sel);
     focus = on
-      ? { lines: new Set(on.lines), stations: new Set(selectedNodes(s, on).concat(on.lines.flatMap((i) => s.stops[i]))), selected: new Set(on.node >= 0 ? [on.node] : []), hot }
+      ? { lines: new Set(on.lines), stations: new Set(selectedNodes(s, on).concat(on.lines.flatMap((i) => s.stops[i]))), selected: new Set(on.node >= 0 ? [on.node] : []), hot, thin: new Set(on.thin) }
       : hot >= 0 ? { lines: null, stations: null, selected: new Set(), hot } : undefined;
     return focus;
   };
   // pans and zooms draw once a frame
   let frame = 0;
   const draw = () => {
+    clampView();
     if (!frame) frame = requestAnimationFrame(paintNow);
   };
   const paintNow = () => {
@@ -610,12 +1021,28 @@ export function startDiagramView(client: ClockClient, mapEl: HTMLElement): void 
       return;
     }
     const f = focusNow();
-    const cn = shown.names.cities, d = widened(shown.d, diagramWidth.peek());
+    const cn = shown.names.cities, d = masked(widened(shown.d, diagramWidth.peek()));
     // the city and zone names under the lines (T-2438, T-2521, T-2640)
     paint(ctx, d, canvas.width, canvas.height, cx, cy, scale * dpr, t, f, cn && ((c) => paintCityNames(c, cn, d.pitch, canvas.width, canvas.height, cx, cy, scale * dpr, dpr, { ink: t.place, font: t.font }, { d, plan: shown!.names })));
     // the map's station names: its ink with a halo of the background
     const st = f?.stations;
     paintNames(ctx, shown.names, d, canvas.width, canvas.height, cx, cy, scale * dpr, dpr, { ink: t.text, halo: t.bg, font: t.font, faded: st ? (k) => !st.has(k) : undefined, fadeAlpha: FADE_ALPHA });
+    // T-3826: the city under the pointer that a click adds, the map's realm button (16 px, white with a grey rim; dark: grey
+    // with a near-black rim), a little see-through; on the view only, never the picture
+    const g = ghostHot;
+    if (g) {
+      const dark = lightness(t.bg) < 0.5;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.globalAlpha = 0.85;
+      ctx.beginPath();
+      ctx.arc(w / 2 + (g.x - cx) * scale, h / 2 - (g.y - cy) * scale, GHOST_PX / 2 - 0.5, 0, 2 * Math.PI);
+      ctx.fillStyle = dark ? "#8a857f" : "#ffffff";
+      ctx.fill();
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = dark ? "#141517" : "#8c8c8c";
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
   };
   new ResizeObserver(() => draw()).observe(canvas);
   effect(() => {
@@ -634,6 +1061,14 @@ export function startDiagramView(client: ClockClient, mapEl: HTMLElement): void 
     if (!on) return void draw();
     if (shown && lastGraphs && [...parts.values()].some((p) => !p.water)) send(lastGraphs);
   });
+  // T-3360, T-3785: the mode buttons and the lines hidden on the map are drawn at once (map/visibility.ts `hidden` is
+  // brought up to date from the same signals by main.ts before the frame)
+  effect(() => {
+    const m = diagramModes.value;
+    void hiddenLines.value, hideBuses.value;
+    try { localStorage.setItem(MODES_STORE, JSON.stringify(m)); } catch { /* this visit only */ }
+    if (diagramShown.peek()) draw();
+  });
   effect(() => {
     const m = diagramWidth.value;
     try { localStorage.setItem(WIDTH_STORE, String(m)); } catch { /* this visit only */ }
@@ -650,15 +1085,18 @@ export function startDiagramView(client: ClockClient, mapEl: HTMLElement): void 
       if (!clock.running.peek()) clock.setRunning(true);
     }
     canvas.style.display = on ? "block" : "none";
+    // T-3409: the chosen cities' stations before the graph is asked for
+    if (on) syncCut();
     client.post({ kind: "diagram", on });
     if (on) {
       // last in the map's box, over the marks added since at the same z-index (attractions, zones loading)
       mapEl.appendChild(canvas);
       if (!shown) diagramProgress.value = 0;
-      else place();
+      else (place(), drawingShare());
       draw();
     } else {
       diagramProgress.value = null;
+      (choice = null), (fitChoice = false);
       hideTag();
       back();
     }
@@ -670,32 +1108,55 @@ export function startDiagramView(client: ClockClient, mapEl: HTMLElement): void 
 
   // ---- the pointer: drag to pan, wheel to zoom about the pointer, click and hover as on the map
   /** what is under a point, CSS px in the canvas */
-  const hitAt = (px: number, py: number): { station: number } | { line: number; at: number } | null => {
+  const hitAt = (px: number, py: number): { station: number } | { line: number; at: number } | { thin: number } | null => {
     const s = shown;
     if (!s || !scale) return null;
     const ox = px - canvas.clientWidth / 2, oy = py - canvas.clientHeight / 2;
     const x = cx + ox / scale, y = cy - oy / scale;
-    const hit = pickAt(widened(s.d, diagramWidth.peek()), x, y, scale, PICK_SLOP_PX);
-    if (hit && "station" in hit) return hit;
-    const named = nameAt(s.names, s.d, ox, oy, cx, cy, scale);
+    const hit = pickAt(masked(widened(s.d, diagramWidth.peek())), x, y, scale, PICK_SLOP_PX);
+    // a bus stop of a network of buses alone is no station: nothing to pick, as on the map
+    if (hit && "station" in hit) return s.d.dot?.[hit.station] && !stationsById(world.peek()!).has(stationOf(hit.station)) ? null : hit;
+    const named = nameAt(s.names, masked(s.d), ox, oy, cx, cy, scale);
     return named >= 0 ? { station: named } : hit;
+  };
+  /** the ghost nearest a point (CSS px in the canvas) within GHOST_HIT_PX, null for none */
+  const ghostAt = (px: number, py: number): Ghost | null => {
+    if (!scale) return null;
+    let best: Ghost | null = null, bd = GHOST_HIT_PX ** 2;
+    for (const g of ghostsNow()) {
+      const d = (canvas.clientWidth / 2 + (g.x - cx) * scale - px) ** 2 + (canvas.clientHeight / 2 - (g.y - cy) * scale - py) ** 2;
+      if (d < bd) (bd = d), (best = g);
+    }
+    return best;
   };
   /** the station a node stands for: its key, the lowest member's id on the lines */
   const stationOf = (k: number) => String(shown!.graph.key[k]);
   const hover = (px: number, py: number) => {
     const s = shown, w = world.peek();
     const hit = hitAt(px, py);
-    canvas.style.cursor = hit ? "pointer" : "grab";
+    // T-3826: beside the drawing, a city a click adds; what is drawn comes first
+    const ghost = hit ? null : ghostAt(px, py);
+    canvas.style.cursor = hit || ghost ? "pointer" : "grab";
     const newHot = hit && "line" in hit ? hit.line : -1;
     if (newHot !== hot) (hot = newHot), draw();
+    if (ghost !== ghostHot) (ghostHot = ghost), draw();
     let lines: TipLine[] | null = null;
-    if (s && w && hit && "station" in hit) {
+    if (ghost) lines = [t("diagramView.addCity", { name: tPlace(ghost.zone, cityById(ghost.zone).name) })];
+    else if (s && w && hit && "station" in hit) {
       const id = stationOf(hit.station), c = complexes.peek().of.get(id), ov = live.overlay;
       const ids = c === undefined ? [id] : complexes.peek().members[c];
       lines = ov ? complexTip(ov, w, ids, s.names.text[hit.station]) : [s.names.text[hit.station]];
     } else if (s && w && hit && "line" in hit) {
       const num = s.graph.lines[s.d.lineOf[hit.line]].id, l = w.save.lines.find((x) => x.num === num);
       if (l) lines = lineTag(l, s, hit.line, hit.at);
+    } else if (s && w && hit && "thin" in hit) {
+      // a bus or ferry line: the map's bullet and name
+      const num = s.d.thin![hit.thin].id, l = w.save.lines.find((x) => x.num === num);
+      if (l) {
+        const row = factRow(lineBullet(l), Object.assign(document.createElement("span"), { textContent: l.name }));
+        row.style.gap = "5px";
+        lines = [row];
+      }
     }
     if (!lines) {
       if (tagShown) (tag.style.display = "none"), (tagShown = false);
@@ -712,16 +1173,18 @@ export function startDiagramView(client: ClockClient, mapEl: HTMLElement): void 
     const hit = hitAt(px, py);
     selection.value = !hit ? null
       : "station" in hit ? { kind: "station", station: stationOf(hit.station) }
+      : "thin" in hit ? { kind: "line", line: String(s.d.thin![hit.thin].id) }
       : { kind: "line", line: String(s.graph.lines[s.d.lineOf[hit.line]].id) };
   };
-  let drag: { x: number; y: number; x0: number; y0: number; far: boolean } | null = null;
+  let drag: { x: number; y: number; x0: number; y0: number; far: boolean; ghost: Ghost | null } | null = null;
   const local = (e: MouseEvent): [number, number] => {
     const r = canvas.getBoundingClientRect();
     return [e.clientX - r.left, e.clientY - r.top];
   };
   canvas.addEventListener("pointerdown", (e) => {
     if (e.button !== 0) return;
-    drag = { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, far: false };
+    // T-3826: a city is added only by a click on a ghost already showing (a tap shows none first, so adds nothing unseen)
+    drag = { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, far: false, ghost: ghostHot };
     canvas.setPointerCapture(e.pointerId);
     hideTag();
   });
@@ -736,11 +1199,15 @@ export function startDiagramView(client: ClockClient, mapEl: HTMLElement): void 
     cx -= (e.clientX - drag.x) / scale;
     cy += (e.clientY - drag.y) / scale;
     drag = { ...drag, x: e.clientX, y: e.clientY };
-    moved = true;
+    (moved = true), (fitChoice = false);
     draw();
   });
   canvas.addEventListener("pointerup", (e) => {
-    if (drag && !drag.far) click(...local(e));
+    const g = drag && !drag.far ? drag.ghost : null;
+    if (g && ghostAt(...local(e))?.zone === g.zone) {
+      const now = diagramCities.peek();
+      if (!now.includes(g.zone)) diagramCities.value = [...now.filter((c) => c !== NO_CITIES), g.zone].sort();
+    } else if (drag && !drag.far) click(...local(e));
     drag = null;
     hover(...local(e));
   });
@@ -754,12 +1221,13 @@ export function startDiagramView(client: ClockClient, mapEl: HTMLElement): void 
     if (!scale) return;
     hideTag();
     const r = canvas.getBoundingClientRect(), px = e.clientX - r.left - r.width / 2, py = e.clientY - r.top - r.height / 2;
-    const f = Math.exp(-e.deltaY * (e.deltaMode === 1 ? 0.05 : 0.0015));
+    // never below the cap, but a view already past it (the drawing shrank) is not pushed back by a zoom out
+    const to = Math.max(scale * Math.exp(-e.deltaY * (e.deltaMode === 1 ? 0.05 : 0.0015)), Math.min(scale, minScale()));
     // the point under the pointer stays there
-    cx += px / scale - px / (scale * f);
-    cy -= py / scale - py / (scale * f);
-    scale *= f;
-    moved = true;
+    cx += px / scale - px / to;
+    cy -= py / scale - py / to;
+    scale = to;
+    (moved = true), (fitChoice = false);
     draw();
   }, { passive: false });
   window.addEventListener("keydown", (e) => {
@@ -782,7 +1250,7 @@ export function startDiagramView(client: ClockClient, mapEl: HTMLElement): void 
     afterPaint(() => {
       let blobbing = false;
       try {
-        const out = picture(s, theme());
+        const out = picture(s, theme(), masked);
         if (!out) return;
         blobbing = true;
         // for checks: the picture's size and pitch
@@ -807,11 +1275,15 @@ export function startDiagramView(client: ClockClient, mapEl: HTMLElement): void 
 
 /** The whole diagram on a canvas of its own, unselected, at the largest names' level of at most
  * PICTURE_PITCH_PX a pitch that keeps it within PICTURE_MAX_SIDE and PICTURE_MAX_AREA. */
-function picture(s: Shown, t: { bg: string; ink: string; pill: string; selected: string; text: string; place: string; font: string; edge?: string; border?: string }): { canvas: HTMLCanvasElement; pitchPx: number } | null {
-  const d = widened(s.d, diagramWidth.peek()), levels = s.names.levels;
+function picture(s: Shown, t: { bg: string; ink: string; pill: string; selected: string; text: string; place: string; font: string; edge?: string; border?: string }, mask: (d: Drawing) => Drawing): { canvas: HTMLCanvasElement; pitchPx: number } | null {
+  const d = mask(widened(s.d, diagramWidth.peek())), levels = s.names.levels;
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-  for (const r of d.ribbons) for (let j = 0; j + 1 < r.length; j += 2) (x0 = Math.min(x0, r[j])), (x1 = Math.max(x1, r[j])), (y0 = Math.min(y0, r[j + 1])), (y1 = Math.max(y1, r[j + 1]));
-  if (!(x1 > x0) || !(y1 > y0)) return null;
+  // only what is drawn: lines and stations the mode buttons or hidden lines leave out do not widen the frame
+  const grow = (r: Float64Array) => { for (let j = 0; j + 1 < r.length; j += 2) (x0 = Math.min(x0, r[j])), (x1 = Math.max(x1, r[j])), (y0 = Math.min(y0, r[j + 1])), (y1 = Math.max(y1, r[j + 1])); };
+  d.ribbons.forEach((r, i) => { if (!d.off?.[i]) grow(r); });
+  d.thin?.forEach((l, i) => { if (!d.offThin?.[i]) grow(l.ribbon); });
+  // one straight line is as flat as it is long: the margin below gives it a frame
+  if (!(x1 >= x0) || !(y1 >= y0)) return null;
   // a pill reaches a pitch past a line's end
   const pad = 2 * d.pitch;
   (x0 -= pad), (y0 -= pad), (x1 += pad), (y1 += pad);
@@ -823,6 +1295,7 @@ function picture(s: Shown, t: { bg: string; ink: string; pill: string; selected:
     const at = levels[li] / d.pitch, b = [x0, y0, x1, y1];
     // the names stick out past the lines
     for (let i = 0; i < s.names.at[li].node.length; i++) {
+      if (d.offNode?.[s.names.at[li].node[i]]) continue;
       const n = placedBox(s.names, li, i, at);
       (b[0] = Math.min(b[0], n[0])), (b[1] = Math.min(b[1], n[1])), (b[2] = Math.max(b[2], n[2])), (b[3] = Math.max(b[3], n[3]));
     }

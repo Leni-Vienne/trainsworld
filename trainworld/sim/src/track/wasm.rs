@@ -14,8 +14,8 @@ use super::boarding::Boarding;
 use super::bridge;
 use super::cost::{BlockIndex, ClassGrid, GeoMask, MaskSet, NoWater, RunMask, TransformedMask, UnionMask, WaterMask, WorldWater};
 use super::frame::FrameKind;
-use super::geom::{self, design_radii, GeomIssue, Pi};
-use super::net::{CrossKind, EdgeData, GroupLook, Issue, LineData, LoopKind, Network, NodeData, StationData, Weekend, SPLIT_ROOM};
+use super::geom::{self, design_radii, GeomIssue, Pi, Ramps};
+use super::net::{CrossKind, EdgeData, GroupLook, Issue, OuterGroup, LineData, LoopKind, Network, NodeData, StationData, Weekend, SPLIT_ROOM};
 use super::params::*;
 use super::profile;
 use super::roads::{self, RoadTile, Roads};
@@ -60,6 +60,8 @@ pub struct TrackApi {
     route_legs: Vec<Vec<Pi>>,
     /// T-3168: the last preview's crossing legs' vertex rows (`preview_leg_curves`).
     preview_leg_rows: Vec<f64>,
+    /// T-3027: the last route or edge preview's ramps slower than the track's cap (`preview_ramp_labels`).
+    preview_ramps: Vec<f64>,
     /// T-3092: how many junctions of the last route asked about fell back to flat for want of room.
     flyover_fell_back: u32,
     /// T-656: the last route's alignment once bridged over water (what is built and drawn), else
@@ -73,6 +75,10 @@ pub struct TrackApi {
     route_tangent: bool,
     /// T-817: the auto radius cap of the corners the drawing tool makes, ground m (`set_design_speed`).
     route_cap: f64,
+    /// T-3027: the target speed itself, km/h (`set_design_speed`): it sizes the ramps drawn.
+    route_kmh: f64,
+    /// T-3027: the ramp per level the route being laid out (or the last one) aims for, m (`route_op`).
+    route_ramp_m: u16,
     /// T-3169: the radius a real flyover's crossing leg aims for at every curve, ground m
     /// (`set_flyover_speed`).
     flyover_r: f64,
@@ -109,6 +115,11 @@ pub struct TrackApi {
     ramp_found: bool,
     /// The ramp tried had no room.
     ramp_failed: bool,
+    /// T-3027: the route being laid out changes level (a ramp, a bridge, a ramp over track), so a
+    /// shorter ramp might fit where this one did not (`route_op`).
+    route_levels: bool,
+    /// T-3027: this is the last ramp length `route_op` tries: a ramp over track may give up for a flat crossing.
+    ramp_last: bool,
     /// The last tangent route's circle: centre x, y and ground radius, else empty.
     route_arc: Vec<f64>,
     /// The end node of the last route asked about (new or existing).
@@ -262,16 +273,20 @@ fn cars_needed(w: &TrackWorld) -> [u32; FLEETS] {
     out
 }
 
-/// The fleets: ordinary cars, high-speed cars, buses, boats, trams.
-const FLEETS: usize = 5;
+/// The fleets: ordinary cars, high-speed cars, buses, Medium boats, trams, Small boats, Large boats
+/// (T-3892, `ferry::Boat::fleet`).
+const FLEETS: usize = 7;
+/// The boat fleets, Small, Medium and Large.
+const BOAT_FLEETS: [usize; 3] = [5, 3, 6];
 
-/// Which fleet a line's trains come from: 0 ordinary cars, 1 high-speed cars, 2 buses, 3 boats, 4 trams.
+/// Which fleet a line's trains come from: 0 ordinary cars, 1 high-speed cars, 2 buses, 3 Medium boats,
+/// 4 trams, 5 Small boats, 6 Large boats.
 fn fleet_kind(n: &Network, l: usize) -> usize {
-    if n.line_bus[l].is_some() { 2 } else if n.line_ferry[l].is_some() { 3 } else if n.line_tram(l as u32) { 4 } else { n.line_fast[l] as usize }
+    if n.line_bus[l].is_some() { 2 } else if let Some(r) = n.line_ferry[l].as_ref() { r.boat.fleet() } else if n.line_tram(l as u32) { 4 } else { n.line_fast[l] as usize }
 }
 
 /// Price of a car of each kind (a bus or a boat counting as one), US$M.
-const CAR_PRICES: [f64; FLEETS] = [CAR_PRICE, HS_CAR_PRICE, BUS_PRICE, BOAT_PRICE, TRAM_CAR_PRICE];
+const CAR_PRICES: [f64; FLEETS] = [CAR_PRICE, HS_CAR_PRICE, BUS_PRICE, BOAT_PRICE, TRAM_CAR_PRICE, SMALL_BOAT_PRICE, LARGE_BOAT_PRICE];
 
 /// A constructed edge's upkeep a game day, US$M; None for blueprint, and for crossovers, which cost
 /// nothing on top of their track (T-867).
@@ -298,9 +313,14 @@ fn upkept_port(n: &Network, i: usize) -> bool {
 fn port_upkeep() -> f64 {
     UPKEEP_PORT * ECONOMY / 1e6
 }
-/// A constructed bus route's upkeep a game day, US$M; None for a planned one (T-1464).
+/// A constructed bus route's upkeep a game day, US$M, a BRT one's lanes included (T-3907); None for a
+/// planned one (T-1464).
 fn bus_upkeep(n: &Network, l: u32) -> Option<f64> {
-    n.line_bus.get(l as usize)?.as_ref().filter(|r| r.built && n.line_ok(l)).map(|_| n.bus_road_m(l) / 1000.0 * UPKEEP_BUS_KM * ECONOMY / 1e6)
+    n.line_bus.get(l as usize)?.as_ref().filter(|r| r.built && n.line_ok(l)).map(|_| {
+        // T-3907: a BRT route's road in town at street tram track's rate
+        let (road, town) = (n.bus_road_m(l), n.brt_town_m(l));
+        ((road - town) * UPKEEP_BUS_KM + town * UPKEEP_BRT_KM) / 1000.0 * ECONOMY / 1e6
+    })
 }
 fn station_upkeep(n: &Network, i: usize) -> f64 {
     let share = if n.one_platform(i as u32) { UPKEEP_ONE_PLATFORM_SHARE } else { 1.0 };
@@ -376,12 +396,15 @@ impl TrackApi {
             route_express: vec![],
             route_legs: vec![],
             preview_leg_rows: vec![],
+            preview_ramps: vec![],
             flyover_fell_back: 0,
             route_bridged: vec![],
             bridge_refused: false,
             bridge_short: Issue::BridgeNoRoom,
             route_tangent: false,
             route_cap: R_CAP,
+            route_kmh: DESIGN_SPEEDS[0],
+            route_ramp_m: RAMP_PER_LEVEL as u16,
             flyover_r: design_radius(FLYOVER_KMH),
             route_hsr: false,
             route_kind: TrackKind::Regular,
@@ -399,6 +422,8 @@ impl TrackApi {
             ramp_try: Ramp::Flat,
             ramp_found: false,
             ramp_failed: false,
+            route_levels: false,
+            ramp_last: true,
             route_arc: vec![],
             route_end: u32::MAX,
             preview_speeds: vec![],
@@ -965,13 +990,41 @@ fn vertex_rows(f: &geom::Fit, verts: &[Pi], out: &mut Vec<f64>, cap: f64) {
     for (i, v) in verts.iter().enumerate() {
         let rad = f.radius.get(i).copied().unwrap_or(0.0);
         let (x, y) = if rad > 0.0 && !f.pieces.is_empty() { let (x, y, _) = geom::pos_at(&f.pieces, f.vert_s[i]); (x, y) } else { (v.x, v.y) };
-        out.extend([x, y, rad, if rad > 0.0 { (A_LAT * rad).sqrt().min(cap) * 3.6 } else { cap * 3.6 }]);
+        out.extend([x, y, rad, vertex_kmh(f, i, cap)]);
     }
 }
 
+/// The speed limit of vertex `i`'s curve in fit `f`, km/h, up to `cap` (m/s): the cap where it has none
+/// or (T-3883) one too slight to limit speed (`MIN_TURN`), as trains run it.
+fn vertex_kmh(f: &geom::Fit, i: usize, cap: f64) -> f64 {
+    let rad = f.radius.get(i).copied().unwrap_or(0.0);
+    let slight = f.pieces.iter().zip(&f.piece_at_vertex).any(|(p, &at)| at as usize == i && p.k != 0.0 && p.turn() < MIN_TURN);
+    if rad > 0.0 && !slight { (A_LAT * rad).sqrt().min(cap) * 3.6 } else { cap * 3.6 }
+}
+
 /// Hops already searched while trying stops (T-237): `(from, to, side arrived on at from, 2 for
-/// none)` to `Network::find_path`'s answer. Valid for one state of the network.
-type HopMemo = std::collections::HashMap<(u32, u32, u8, u8), Option<(Vec<u32>, u8)>>;
+/// none, tram)` to `Network::find_path_side`'s answer. Valid for one state of the network. `tram`:
+/// the stops tried are a tram line's even where they hold no tram stop themselves (part of the
+/// line's stops, T-3889).
+#[derive(Default)]
+pub(super) struct HopMemo {
+    hops: std::collections::HashMap<(u32, u32, u8, u8, bool), Option<(Vec<u32>, u8)>>,
+    tram: bool,
+}
+
+impl HopMemo {
+    pub(super) fn new() -> Self {
+        Self::default()
+    }
+    /// For a tram line's stops (`tram`) or a train line's.
+    pub(super) fn of(tram: bool) -> Self {
+        Self { tram, ..Self::default() }
+    }
+    /// Whether `stops` route as a tram line's.
+    fn tram_for(&self, net: &Network, stops: &[u32]) -> bool {
+        self.tram || net.stops_tram(stops)
+    }
+}
 
 /// `Network::route`, with each hop's search kept in `memo`: the same answer, but trying a stop in
 /// every slot searches each hop once. A loop's closing hop takes the side that carries on round
@@ -980,7 +1033,8 @@ fn route_memo(net: &Network, stops: &[u32], memo: &mut HopMemo, ones: &[(u32, u8
     if stops.iter().any(|&s| !net.node_ok(s) || net.node_platform[s as usize] == 0) {
         return None;
     }
-    if let Some(p) = net.route_legs(stops, ones) {
+    let tram = memo.tram_for(net, stops);
+    if let Some(p) = net.route_legs_t(stops, ones, tram) {
         return Some(p);
     }
     let mut path = vec![];
@@ -988,11 +1042,11 @@ fn route_memo(net: &Network, stops: &[u32], memo: &mut HopMemo, ones: &[(u32, u8
     let closes = stops.len() >= 3 && stops[0] == stops[stops.len() - 1];
     for (k, w) in stops.windows(2).enumerate() {
         let want = if closes && k + 2 == stops.len() { net.carry_on_side(&path) } else { None };
-        let found = |memo: &mut HopMemo, x: Option<u8>| memo.entry((w[0], w[1], side.unwrap_or(2), x.unwrap_or(2))).or_insert_with(|| net.find_path_side(w[0], w[1], side, x)).is_some();
-        let key = |x: Option<u8>| (w[0], w[1], side.unwrap_or(2), x.unwrap_or(2));
-        let x = if want.is_some() && found(memo, want) && (!found(memo, None) || net.carry_worth(&memo[&key(want)].as_ref().unwrap().0, &memo[&key(None)].as_ref().unwrap().0)) { want } else { None };
+        let key = |x: Option<u8>| (w[0], w[1], side.unwrap_or(2), x.unwrap_or(2), tram);
+        let found = |memo: &mut HopMemo, x: Option<u8>| memo.hops.entry(key(x)).or_insert_with(|| net.find_path_side(w[0], w[1], side, x, tram)).is_some();
+        let x = if want.is_some() && found(memo, want) && (!found(memo, None) || net.carry_worth(&memo.hops[&key(want)].as_ref().unwrap().0, &memo.hops[&key(None)].as_ref().unwrap().0)) { want } else { None };
         found(memo, x);
-        let (p, s) = memo[&(w[0], w[1], side.unwrap_or(2), x.unwrap_or(2))].as_ref()?;
+        let (p, s) = memo.hops[&key(x)].as_ref()?;
         path.extend_from_slice(p);
         side = Some(*s);
     }
@@ -1064,7 +1118,7 @@ fn turn_last(net: &Network, line: u32, stops: &[u32], path: &[u32], memo: &mut H
     }
     let old = round_guess(net, line, stops, path);
     let nodes = nodes_of(net, path);
-    let (_, k) = net.loop_back(path, true, nodes.len(), old + turn_allowance(old))?;
+    let (_, k) = net.loop_back(path, true, nodes.len(), old + turn_allowance(old), net.line_tram(line))?;
     let at = net.match_run(&nodes, stops, &net.stop_reversals(path), net.line_ones(line), path)?.0;
     let branch = (0..n).rev().find(|&i| at[i] <= k)?;
     let mut new = stops.to_vec();
@@ -1079,7 +1133,7 @@ fn turn_first(net: &Network, line: u32, stops: &[u32], path: &[u32], memo: &mut 
     let nodes = nodes_of(net, path);
     let at = net.match_run(&nodes, stops, &net.stop_reversals(path), &[], path)?.0;
     let old = round_guess(net, line, stops, path);
-    let (_, k) = net.loop_back(path, false, at[open_prefix(stops)], old + turn_allowance(old))?;
+    let (_, k) = net.loop_back(path, false, at[open_prefix(stops)], old + turn_allowance(old), net.line_tram(line))?;
     let mut new: Vec<u32> = (1..n).filter(|&i| at[i] > k).map(|i| stops[i]).collect();
     let &first = new.first()?;
     new.push(first);
@@ -1109,7 +1163,8 @@ fn route_plain_close(net: &Network, stops: &[u32], memo: &mut HopMemo) -> Option
     let mut path = route_memo(net, &stops[..n - 1], memo, &[])?;
     let &last = path.last()?;
     let side = net.port_side(last >> 1, 1 - (last & 1));
-    let hop = memo.entry((stops[n - 2], stops[n - 1], side.unwrap_or(2), 2)).or_insert_with(|| net.find_path_side(stops[n - 2], stops[n - 1], side, None));
+    let tram = memo.tram_for(net, stops);
+    let hop = memo.hops.entry((stops[n - 2], stops[n - 1], side.unwrap_or(2), 2, tram)).or_insert_with(|| net.find_path_side(stops[n - 2], stops[n - 1], side, None, tram));
     path.extend_from_slice(&hop.as_ref()?.0);
     Some(path)
 }
@@ -1117,6 +1172,7 @@ fn route_plain_close(net: &Network, stops: &[u32], memo: &mut HopMemo) -> Option
 /// The turns a line's ends can take (T-3021): either end of an open line, or the first stop's end
 /// of a balloon. Bus and ferry lines take none.
 fn turns(net: &Network, line: u32, memo: &mut HopMemo) -> Vec<Turn> {
+    memo.tram |= net.line_tram(line);
     if !net.line_ok(line) || net.line_bus.get(line as usize).is_some_and(|b| b.is_some()) || net.line_ferry.get(line as usize).is_some_and(|f| f.is_some()) {
         return vec![];
     }
@@ -1149,6 +1205,7 @@ fn open_prefix(stops: &[u32]) -> usize {
 /// The stop of a balloon whose marker turns it back into the open line it was turned from, when
 /// turning that line gives this balloon again (T-3021).
 fn unturn_branch(net: &Network, line: u32, memo: &mut HopMemo) -> Option<u32> {
+    memo.tram |= net.line_tram(line);
     let stops = net.line_stops(line);
     if !closed(stops) || net.line_loop(line) != LoopKind::Balloon {
         return None;
@@ -1318,7 +1375,7 @@ fn straighten(net: &Network, stops: &[u32], path: &[u32], ones: &[(u32, u8)]) ->
     if turns == 0 || stops.len() < 3 || closed(stops) {
         return None;
     }
-    let mut memo = HopMemo::new();
+    let mut memo = HopMemo::of(net.stops_tram(stops) || net.path_tram(path));
     let mut best: (Vec<u32>, Vec<u32>) = (vec![], vec![]);
     for &s in stops {
         best = best_slot(net, &best.0, s, &mut memo, ones)?;
@@ -2018,17 +2075,20 @@ fn lead_in_capped(x: f64, y: f64, level: i8, dir: f64, toward: (f64, f64), scale
     Some(Pi::new(x + dir.cos() * d, y + dir.sin() * d, 0.0, level).quantised())
 }
 
-/// Points along an alignment for drawing: x, y, height triples; arcs within 5 cm, straights
-/// every 100 m (so ramps show), ramp ends included.
-fn render_speeds(pieces: &[geom::Piece], vert: &[[f64; 2]], cap: f64) -> Vec<f32> {
+/// The speed limit of each segment `render_samples` draws, km/h: curves and (T-3027) ramps, as
+/// `geom::limits` with `old` for track from before T-3027.
+fn render_speeds(pieces: &[geom::Piece], vert: &[[f64; 2]], cap: f64, old: bool) -> Vec<f32> {
     if pieces.is_empty() { return vec![]; }
+    let lims = geom::limits(pieces, vert, old, cap);
     render_chainages(pieces, vert).windows(2).map(|pair| {
         let mid = (pair[0] + pair[1]) * 0.5;
-        let i = pieces.partition_point(|p| p.s0 <= mid).saturating_sub(1);
-        (pieces[i].v_curve().min(cap) * 3.6) as f32
+        let i = lims.partition_point(|l| l.s0 <= mid).saturating_sub(1);
+        (lims[i].v * 3.6) as f32
     }).collect()
 }
 
+/// Points along an alignment for drawing: x, y, height triples; arcs within 5 cm, straights
+/// every 100 m (so ramps show), ramp ends included.
 fn render_chainages(pieces: &[geom::Piece], vert: &[[f64; 2]]) -> Vec<f64> {
     let mut ss: Vec<f64> = vec![];
     for p in pieces {
@@ -2174,7 +2234,7 @@ impl TrackApi {
         if self.w.net.edge_ok(id) && self.w.net.edge_built[id as usize] {
             return self.refuse(Issue::NoSuchEdge { edge: id });
         }
-        self.run(Op::Edge { id, data: Some(EdgeData { a, b, tracks, pis: pis_from(pis), built: false, off: false, thru: vec![], crossover: false, kind: TrackKind::Regular, sep: false, day: 0, oneway: 0, join: [0; 2], limit: 0 }) })
+        self.run(Op::Edge { id, data: Some(EdgeData { a, b, tracks, pis: pis_from(pis), built: false, off: false, thru: vec![], crossover: false, kind: TrackKind::Regular, sep: false, day: 0, oneway: 0, join: [0; 2], limit: 0, ramp: 0 }) })
     }
     pub fn set_station(&mut self, node: u32, platform: u16, name: String) -> u32 {
         self.run(Op::Station { node, data: Some(StationData { platform, name, named: false, built: false, off: false, upgrades: 0, berth: None, day: 0, one: 0, fare: 0, own: String::new() }) })
@@ -2242,7 +2302,7 @@ impl TrackApi {
         let Some(path) = self.w.net.route(stops, &[]) else {
             return self.refuse(Issue::LinePath { line: id });
         };
-        let mut d = LineData { rows: 0, x: Default::default(), symbol: String::new(), trains: None, auto: None, name, colour, stops: stops.to_vec(), path, tph: [high, medium, low], dwell_s, turnaround_s, cars, fast: false, bus: None, ferry: None, group: 0, group_name: String::new(), group_look: Default::default(), day: 0, hand: false, one_way: false, limit: 0, twin: Default::default(), weekend: Default::default(), ones: vec![], fare_dist: false };
+        let mut d = LineData { rows: 0, x: Default::default(), symbol: String::new(), trains: None, auto: None, name, colour, stops: stops.to_vec(), path, tph: [high, medium, low], dwell_s, turnaround_s, cars, fast: false, bus: None, ferry: None, group: 0, group_name: String::new(), group_look: Default::default(), outer: vec![], day: 0, hand: false, one_way: false, limit: 0, twin: Default::default(), weekend: Default::default(), ones: vec![], fare_dist: false };
         d.x = crate::track::net::Extra::of_high(&d);
         self.run(Op::Line { id, data: Some(d) })
     }
@@ -2281,6 +2341,8 @@ mod quad_edit_tests;
 #[cfg(test)]
 mod ramp_tests;
 #[cfg(test)]
+mod ramp_speed_tests;
+#[cfg(test)]
 mod beside_tests;
 
 #[cfg(test)]
@@ -2302,6 +2364,9 @@ mod stop_pass_tests;
 mod stop_order_tests;
 #[cfg(test)]
 mod oneway_tests;
+/// T-3835: a loop its track takes round only one way runs one way.
+#[cfg(test)]
+mod loop_way_tests;
 #[cfg(test)]
 mod limits_tests;
 /// T-3103, T-3092: flat-junction badges and real flyovers.

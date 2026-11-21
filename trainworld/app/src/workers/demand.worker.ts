@@ -28,7 +28,7 @@ import { EVERYDAY_KEYS, EVERYDAY_NAMES } from "../game/purposes";
 import { PERIODS, TIMES_PER_STOP } from "../game/periods";
 import { DEMAND_DAYS } from "../game/days";
 import { curveKnots, scaledKnots, transferFare } from "../game/fareCurve";
-import { countryFareScales, roundedDefault } from "../game/fareDefault";
+import { countryFareScales, faresIn, marketFareFactors, roundedDefault } from "../game/fareDefault";
 import { demandZones } from "../game/fareZones";
 import { fareFactors, fareScale, fareWeight, marketFareWeight } from "../game/income";
 import type { CorridorBook, CorridorRows } from "../game/demand";
@@ -915,9 +915,6 @@ function closeDeferred() {
 const openQueue: { msg: Extract<ToDemand, { kind: "open" }>; epoch: number }[] = [];
 let closeEpoch = 0;
 
-/** T-2596: `?perfOff=allSums` */
-let allSums = false;
-
 function openQueued(epoch: number): Promise<void> {
   // a macrotask, so the opens already posted are delivered and join this one; T-1533: not while a
   // rough solve of the zone in view runs
@@ -988,7 +985,6 @@ onmessage = (e: MessageEvent<ToDemand>) => {
         if (msg.heapStep) set_heap_step(msg.heapStep);
         const t1 = performance.now();
         aux = !!msg.aux;
-        allSums = !!msg.allSums;
         mine = msg.periods;
         mkt = msg.markets ?? mine;
         shareMarkets = !!msg.share;
@@ -1553,7 +1549,8 @@ function corridorBook(p: IntercityApi): Book {
   const np = REGISTRY.market.places.length;
   const s = p.table_summary(np);
   // (T-3509: the own rows' longer trips rounded to 32 bits, as the rows and the page's old table hold them)
-  const own = s.slice(2 + 3 * np);
+  // (T-2216: each place's trips with no way but rail come after, for the city view's No route)
+  const own = s.slice(2 + 3 * np, 2 + 5 * np);
   for (let i = 0; i < own.length; i += 2) own[i] = Math.fround(own[i]);
   madeBook = { id, key: `${s[0]}:${(s[1] >>> 0).toString(36)}`, n: s[0], totals: s.slice(2, 2 + 3 * np), own };
   railMemo.clear();
@@ -1916,7 +1913,7 @@ async function run() {
       if (firsts.length) dirty.sort((a, b) => rank(a) - rank(b));
       // T-3512: this worker's periods every population of c holds from c's last whole solve on these
       // inputs (setUp's test): a local solve keeps them as they are, so the whole solve after it keeps them too
-      const keptOf = (c: JobCluster) => (job.fresh || job.localAll ? 0 : mine.reduce((m, q) => (c.pops.every((p) => p.solved_mask() & (1 << q) && heldQ.get(p)?.[q] === c.psig[q]) ? m | (1 << q) : m), 0));
+      const keptOf = (c: JobCluster) => (job.fresh ? 0 : mine.reduce((m, q) => (c.pops.every((p) => p.solved_mask() & (1 << q) && heldQ.get(p)?.[q] === c.psig[q]) ? m | (1 << q) : m), 0));
       // T-3512: the share of c's changed periods' passes that `fresh` took in c's last whole solve here (-1: not known)
       const freshShare = (c: JobCluster, fresh: Population[]) => {
         const kept = keptOf(c);
@@ -1983,8 +1980,8 @@ async function run() {
           // (something must stay frozen: the market part, or a city; on all of Japan the cities are a fifth of a solve)
           if (!fresh.length || (!c.part && fresh.length === c.pops.length)) continue;
           const share = freshShare(c, fresh), shareMax = job.localShare?.[job.part?.[0] ?? 0] ?? LOCAL_SHARE_MAX;
-          if (import.meta.env.DEV) console.info(`T3512 v${job.version} periods ${mine.join(",")} kept ${keptOf(c).toString(2)}: ${fresh.length} of ${c.pops.length} populations touched, ${Math.round(100 * share)}% of the cluster's passes${share >= shareMax && !job.alwaysLocal ? ", solved whole at once" : ""}`); // i18n-ignore
-          if (!job.alwaysLocal && share >= shareMax) continue;
+          if (import.meta.env.DEV) console.info(`T3512 v${job.version} periods ${mine.join(",")} kept ${keptOf(c).toString(2)}: ${fresh.length} of ${c.pops.length} populations touched, ${Math.round(100 * share)}% of the cluster's passes${share >= shareMax ? ", solved whole at once" : ""}`); // i18n-ignore
+          if (share >= shareMax) continue;
           const kept = c.part ?? c.pops.find((p) => !fresh.includes(p))!;
           editOf.set(c, { fresh, market, sig: held.get(kept) });
         }
@@ -2009,6 +2006,7 @@ async function run() {
           p.set_complexes(m.complex);
           p.set_upgrades(m.ups ?? new Uint8Array(0));
           if (p instanceof DemandApi) p.set_tram_lines(m.tram ?? new Uint8Array(0)); // T-2926, before set_network
+          p.set_stairs(m.pierLines ?? new Uint8Array(0), m.gradeStops ?? new Uint8Array(0)); // T-3888, before set_network
           p.set_passages(m.passages ?? new Uint32Array(0));
           p.set_span(m.span ?? new Float32Array(0));
           p.set_back_stops(m.back ?? new Uint32Array(0)); // T-3348, before set_network          // T-1277: riders weigh fares by their country's income and pay the curve times its scale;
@@ -2017,7 +2015,9 @@ async function run() {
           let scale = 1, rounded: ReturnType<typeof roundedDefault> = null;
           if (p instanceof IntercityApi) {
             p.set_fare_weight(marketFareWeight(m.fare.scales));
-            p.set_fare_factors(JSON.stringify(fareFactors(m.fare.scales)));
+            // T-3766: with fares by city, a city with a multiple of its own weighs at its own
+            if (m.fare.byCity) { const fx = marketFareFactors(m.fare); p.set_fare_factors_by(JSON.stringify(fx.byCountry), JSON.stringify(fx.byZone)); }
+            else p.set_fare_factors(JSON.stringify(fareFactors(m.fare.scales)));
             p.set_sampled(!job.exactMarket);
             p.set_far_chunks(!job.nearChunks);
             // T-377: the market takes stations as longitude and latitude, each zone in its own frame
@@ -2033,9 +2033,11 @@ async function run() {
             const city = c.cities.find((id) => cities.get(id) === p || everyday.get(id) === p)!;
             const country = cityById(city).country;
             p.set_fare_weight(fareWeight(country));
-            scale = fareScale(country, m.fare.scales);
-            rounded = roundedDefault(m.fare, country); // T-1662
-            popScales.set(p, countryFareScales(country, m.fare));
+            // T-3766: its own city's multiple with fares by city (`faresIn`), else its country's
+            const here = faresIn(m.fare, city);
+            scale = fareScale(country, here.scales);
+            rounded = roundedDefault(here, country); // T-1662
+            popScales.set(p, countryFareScales(country, here));
             const xy = m.stXY.slice();
             for (let k = 0; k < xy.length; k += 2) {
               const w = worldToCity(xy[k], xy[k + 1], city);
@@ -2047,7 +2049,7 @@ async function run() {
               cxy[k] = w.x; cxy[k + 1] = w.y;
             }
             p.set_bus(m.catchN ?? new Uint32Array(0), cxy);
-            setupMs += p.set_network(xy, m.lineN, m.stops, m.times, m.tph, m.cars);            if (p instanceof EverydayApi) p.set_ferry(m.ferry ?? new Uint8Array(0)); // T-2196
+            setupMs += p.set_network(xy, m.lineN, m.stops, m.times, m.tph, m.cars);            p.set_ferry(m.ferry ?? new Uint8Array(0)); // T-2196, T-3892: the outings' fans and the commute's
           }
           p.set_fares(rounded ? rounded.base : m.fare.base * scale, rounded ? rounded.perKm : m.fare.perKm * scale, m.hopKm);
           p.set_fare_mul(m.fareW ?? new Float32Array(0));
@@ -2111,7 +2113,9 @@ async function run() {
       sendMessage({ kind: "plan", version: job.version, solving: dirty.map((c) => (localOf.has(c) ? freshCities(c) : c.cities)), kept: jobClusters.filter((c) => !dirty.includes(c)).flatMap((c) => c.cities), ...(ahead ? { ahead: dirty[0].cities } : {}), local: editOf.size });
       // T-2729: an edit's solve's units, as the loops below make them; a cluster's kept periods come
       // off as it is set up
-      work = job.barrier ? null : new Work(job.version);
+      // T-3876: a barrier solve (a load's) is timed too: its units are a cluster's round of a period, and
+      // the zone in view's figures come with the ahead group, else with the last round of the whole solve
+      work = new Work(job.version);
       // T-3599: each unit's expected ms, worked out as planned (the whole solve's passes replace the
       // priors as it goes): a local solve's period, or a round of a period of a cluster solved whole
       const exps = new Map<JobCluster, Map<string, number | null>>();
@@ -2146,7 +2150,14 @@ async function run() {
       const firstEdit = firstAt >= 0 ? editOf.get(early[firstAt]) : undefined;
       const viewLocal = !!firstEdit && citiesOf(early[firstAt], firstEdit.fresh).includes(job.first!);
       const inView = (c: JobCluster, stage: 0 | 1) => firstAt >= 0 && (stage === 0 ? !viewLocal || early.indexOf(c) <= firstAt : !viewLocal && early.indexOf(c) <= firstAt);
-      if (work) {
+      const groupView = (g: number) => !ahead || g === 0;
+      // (a load's rounds on the real North America save took 50, 46, 46 and 43 s: a flat decay, not the edits' 0.75)
+      const sizeB = (c: JobCluster, r: number) => c.pops.length * 0.9 ** r;
+      if (work && job.barrier) {
+        groups.forEach((late, g) => { for (const c of late) for (const q of units) for (let r = 0; r <= job.rounds; r++) work!.plan(1, 1, roundExp(c, q, r), groupView(g), q, sizeB(c, r)); });
+        work.send(false);
+      }
+      if (work && !job.barrier) {
         for (const c of early) {
           const e = editOf.get(c), fresh = localOf.get(c), v0 = inView(c, 0), v1 = inView(c, 1);
           if (e) { const k = keptOf(c); for (const q of mine) if (!(k & (1 << q))) work.plan(0, 1, localExp(c, e.fresh, q), v0, -1, e.fresh.length); }
@@ -2352,7 +2363,7 @@ async function run() {
         // population's per perceived minute, summary slot 10, times its minutes a curve dollar), and
         // how far the trips' sensitivity reaches as against their riders: the sensitivity-weighted
         // mean km over the rider-weighted one (slots 11 and 12)
-        const perDollar = (id: CityId) => { const c = cityById(id).country; return fareWeight(c) * fareScale(c, n.fare.scales); };
+        const perDollar = (id: CityId) => { const c = cityById(id).country; return fareWeight(c) * fareScale(c, faresIn(n.fare, id).scales); };
         const reach = (d: number, dKm: number, rail: number, km: number) => (d < 0 && km > 0 && rail > 0 ? (dKm / d) / (km / rail) : 1);
         const ls = ids.reduce((a, id) => {
           const v = citySummary[id], w = perDollar(id);
@@ -2770,6 +2781,7 @@ async function run() {
         stageRound = -1;
         roundsHeld.fill(-1);
         for (const c of late) setUp(c);
+        if (work) for (const c of late) for (const q of units) if (c.reuse & (1 << q) || !sideOf(c, q)) for (let r = 0; r <= job.rounds; r++) { const x = roundExp(c, q, r); work.plan(1, -1, x === null ? null : -x, groupView(g), q, sizeB(c, r)); }
         for (let round = 0; round <= job.rounds && !stale; round++) {
           // T-327: a worker ahead holds its last round until every worker has finished it
           while (round > 0 && units.length && !pending && !goAllows(job.version, g, round)) {
@@ -2801,8 +2813,10 @@ async function run() {
             const est = round === 0 && !!only && !job.exact0 && from !== undefined && from !== q;
             for (const c of late) {
               if (c.reuse & (1 << q) || !sideOf(c, q)) continue;
-              if (est && estimate(c, from, q, new Set())) { estimated = true; continue; }
+              if (est && estimate(c, from, q, new Set())) { estimated = true; work?.begin(1, roundExp(c, q, round), groupView(g), q, sizeB(c, round)); work?.end(false); continue; }
+              work?.begin(1, roundExp(c, q, round), groupView(g), q, sizeB(c, round));
               if (!(await step(c, round, q))) { stale = true; break; }
+              work?.end();
             }
             release_skims();
             if (stale) break;
@@ -2813,7 +2827,7 @@ async function run() {
               // the time it publishes the round, and the bubbles need no query to a worker that is
               // busy with the next round
               // T-2596: before the last round only the zones on screen (82 zones' took a worker 4 s a round)
-              const kept = round < job.rounds && !allSums ? sumsFor.filter(([id]) => viewZones.has(id)) : sumsFor;
+              const kept = round < job.rounds ? sumsFor.filter(([id]) => viewZones.has(id)) : sumsFor;
               for (const [id, a] of kept) keepSums(job.version, [round], id, a);
             }
             const { msg, transfer } = figures(q, round, performance.now() - t0, alone ? [alone] : jobClusters, sharing && shared(q) ? { at: mine.includes(q) ? [0, 2] : [1, 2], noMarket: mine.includes(q), side: mine.includes(q) ? "cities" : "market" } : undefined);

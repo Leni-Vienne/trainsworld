@@ -9,6 +9,7 @@ import { clickColour, clickMode, type ClickMode } from "./ToolBar";
 import { busDraft } from "../map/busDraw";
 import { ferryDraft } from "../map/ferryDraw";
 import { buildingDraft } from "../game/buildingView";
+import { ringsArmed } from "../game/fareZonePaint";
 import { touchInput } from "../map/touch";
 import { useModalDialog } from "./Modal";
 import { Chip, Icon } from "./widgets";
@@ -34,7 +35,7 @@ function Ask() {
   useLayoutEffect(() => { if (q) cancel.current?.focus(); }, [q]);
   if (!q) return null;
   return (
-    <dialog class="confirmation" ref={dialog} aria-labelledby="confirmation-title" aria-describedby="confirmation-text" onCancel={() => { ask.value = null; q.stay?.(); }} onClick={(e) => {
+    <dialog class={q.alt ? "confirmation three" : "confirmation"} ref={dialog} aria-labelledby={q.plain ? "confirmation-text" : "confirmation-title"} aria-describedby={q.plain ? undefined : "confirmation-text"} onCancel={() => { ask.value = null; q.stay?.(); }} onClick={(e) => {
       const r = e.currentTarget.getBoundingClientRect();
       if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) { ask.value = null; q.stay?.(); }
     }} onKeyDown={e => {
@@ -45,7 +46,8 @@ function Ask() {
       if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
       else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
     }}>
-      <h2 id="confirmation-title">{t("toolNotes.confirm")}</h2>
+      {/* T-3814: a question that offers its own choices goes without the heading (`plain`) */}
+      {!q.plain && <h2 id="confirmation-title">{t("toolNotes.confirm")}</h2>}
       <p id="confirmation-text">{q.text}</p>
       {q.lines?.length ? (
         <ul class="confirmation-lines">
@@ -60,6 +62,11 @@ function Ask() {
         <button class="btn text" ref={cancel} onClick={() => { ask.value = null; q.stay?.(); }}>
           {q.no}
         </button>
+        {q.alt && (
+          <button class="btn text" onClick={() => { ask.value = null; q.alt!.run(); }}>
+            {q.alt.label}
+          </button>
+        )}
         <button class="btn text danger" onClick={() => { ask.value = null; q.run(); }}>
           {q.yes}
         </button>
@@ -92,7 +99,7 @@ function Notice() {
     : tl === "trip" && sel?.kind === "trip" && !sel.to ? t("toolNotes.tripEnd", { touch })
     : tl === "line" ? t("toolNotes.lineHint", { touch })
     : tl === "trip" ? t("toolNotes.tripHint", { touch })
-    : tl === "fares" ? t("toolNotes.fareHint", { touch })
+    : tl === "fares" ? t(ringsArmed.value ? "toolNotes.fareRingHint" : "toolNotes.fareHint", { touch })
     : "";
   const show = n && performance.now() - n.at < NOTICE_MS;
   // T-1464: the bus line tool: which line, how many points, and the way to finish (also on touch)

@@ -53,9 +53,30 @@ impl TrackApi {
     pub fn set_fleet_ferry(&mut self, boats: u32) {
         self.fleet[3] = boats;
     }
-    /// Boats the running ferry lines need now (T-2193).
+    /// Medium boats the running ferry lines need now (T-2193).
     pub fn boats_needed(&self) -> u32 {
         cars_needed(&self.w)[3]
+    }
+    /// Small boats owned (T-3892).
+    pub fn fleet_ferry_small(&self) -> u32 {
+        self.fleet[5]
+    }
+    pub fn set_fleet_ferry_small(&mut self, boats: u32) {
+        self.fleet[5] = boats;
+    }
+    /// Large boats owned (T-3892).
+    pub fn fleet_ferry_large(&self) -> u32 {
+        self.fleet[6]
+    }
+    pub fn set_fleet_ferry_large(&mut self, boats: u32) {
+        self.fleet[6] = boats;
+    }
+    /// Small and Large boats the running ferry lines need now (T-3892).
+    pub fn boats_needed_small(&self) -> u32 {
+        cars_needed(&self.w)[5]
+    }
+    pub fn boats_needed_large(&self) -> u32 {
+        cars_needed(&self.w)[6]
     }
     /// The `TrackKind` number of an edge (0 rail, 1 high speed, 2 street tram, 3 tram); 0 for none.
     pub fn edge_kind(&self, e: u32) -> u8 {
@@ -117,6 +138,12 @@ impl TrackApi {
             UPKEEP_STATION_UNDER,
             // a one-platform station's share of either station figure
             UPKEEP_ONE_PLATFORM_SHARE,
+            // T-3892: a Small boat's price US$M and running cost per boat-km US$, then a Large one's
+            // (indices 18 and 19 are Medium's)
+            SMALL_BOAT_PRICE, SMALL_RUN_COST_BOAT_KM, LARGE_BOAT_PRICE, LARGE_RUN_COST_BOAT_KM,
+            // T-3907: BRT's price per road-km US$M, its upkeep a day per road-km in place of a bus route's US$, and
+            // its buses' least moving speed km/h
+            BRT_COST_PER_KM, UPKEEP_BRT_KM, crate::track::streets::lane_kmh(true),
         ]
     }
     /// Running cost of the running lines per hour at a demand level, US$M: trains an hour in each
@@ -173,7 +200,8 @@ impl TrackApi {
         let count = upkept.len() as f64;
         let stations: f64 = upkept.iter().map(|&i| station_upkeep(n, i)).sum();
         let bus_km: f64 = n.bus_lines().into_iter().filter_map(|l| bus_upkeep(n, l).map(|_| n.bus_road_m(l) / 1000.0)).sum();
-        let buses = bus_km * UPKEEP_BUS_KM * ECONOMY / 1e6;
+        // T-3907: a BRT route at its own rate
+        let buses: f64 = n.bus_lines().into_iter().filter_map(|l| bus_upkeep(n, l)).sum();
         let port_count = (0..n.node_alive.len()).filter(|&i| upkept_port(n, i)).count() as f64;
         let ports = port_count * port_upkeep();
         vec![track + stations + buses + ports, track, stations, km, count, buses, bus_km, ports, port_count]
@@ -223,7 +251,7 @@ impl TrackApi {
         let ordinary = train_km[0] * RUN_COST_TRAIN_KM + car_km[0] * RUN_COST_CAR_KM;
         let fast = train_km[1] * HS_RUN_COST_TRAIN_KM + car_km[1] * HS_RUN_COST_CAR_KM;
         let bus = train_km[2] * RUN_COST_BUS_KM;
-        let boats = train_km[3] * RUN_COST_BOAT_KM;
+        let boats = train_km[3] * RUN_COST_BOAT_KM + train_km[5] * SMALL_RUN_COST_BOAT_KM + train_km[6] * LARGE_RUN_COST_BOAT_KM;
         let tram = &TrackKind::Tram.spec().car;
         let trams = train_km[4] * tram.run_train_km + car_km[4] * tram.run_car_km;
         (ordinary + fast + bus + boats + trams) * ECONOMY / 1e6
@@ -308,7 +336,8 @@ impl TrackApi {
     }
     /// Per stretch between stops of run 0 (T-817): the highest speed the trains reach there, the
     /// highest the limits allow, km/h, and what sets that limit: 0 the trains' top speed, 1 the
-    /// track (ordinary track's 160), 2 curves, 3 a crossover, 4 a piece's own speed limit (T-3405).
+    /// track (ordinary track's 160), 2 curves, 3 a crossover, 4 a piece's own speed limit (T-3405), 5 a ramp
+    /// (T-3027).
     pub fn line_stretch_speeds(&self, line: u32) -> Vec<f64> {
         let net = &self.w.net;
         let Some(s) = self.w.svc.lines.get(line as usize).filter(|s| s.ok) else { return vec![] };
@@ -324,15 +353,17 @@ impl TrackApi {
             for &p in &run.segs[n0..n1] {
                 let e = crate::track::net::path_edge(p);
                 let cap = net.v_cap(e);
-                for pc in net.edge_pieces(e) {
-                    if long && pc.len < SHORT_PIECE_M {
+                let pcs = net.edge_pieces(e);
+                for l in net.edge_limits(e, f64::INFINITY) {
+                    if long && pcs[l.piece].len < SHORT_PIECE_M {
                         continue;
                     }
-                    let curve = pc.v_curve();
-                    let v = curve.min(cap).min(top);
+                    // the curve's or (T-3027) the ramp's own limit
+                    let own = l.v;
+                    let v = own.min(cap).min(top);
                     if v > best + 1e-9 {
                         best = v;
-                        why = if top <= cap && top <= curve { 0.0 } else if cap <= curve { if net.edge_crossover[e as usize] { 3.0 } else if cap < net.v_kind_cap(e) { 4.0 } else { 1.0 } } else { 2.0 };
+                        why = if top <= cap && top <= own { 0.0 } else if cap <= own { if net.edge_crossover[e as usize] { 3.0 } else if cap < net.v_kind_cap(e) { 4.0 } else { 1.0 } } else if l.ramp { 5.0 } else { 2.0 };
                     }
                 }
             }
@@ -402,9 +433,10 @@ impl TrackApi {
             if buy[4] > 0 {
                 rows.extend([15.0, 0.0, 0.0, 0.0, 0.0, buy[4] as f64, buy[4] as f64 * CAR_PRICES[4]]);
             }
-            // T-2193: boats, kind 13 (ports are kind 12)
-            if buy[3] > 0 {
-                rows.extend([13.0, 0.0, 0.0, 0.0, 0.0, buy[3] as f64, buy[3] as f64 * CAR_PRICES[3]]);
+            // T-2193: boats, kind 13 (ports are kind 12), of every size (T-3892)
+            let boats: u32 = BOAT_FLEETS.iter().map(|&k| buy[k]).sum();
+            if boats > 0 {
+                rows.extend([13.0, 0.0, 0.0, 0.0, 0.0, boats as f64, BOAT_FLEETS.iter().map(|&k| buy[k] as f64 * CAR_PRICES[k]).sum()]);
             }
         }
         rows

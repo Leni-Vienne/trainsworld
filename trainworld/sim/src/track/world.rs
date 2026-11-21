@@ -97,6 +97,93 @@ impl Default for PaceIn {
     }
 }
 
+/// T-3646: what a settle and the departures' placing leave on one line, weekdays and weekends, as
+/// an undo or redo puts it back: re-settling from the edited state lands elsewhere, since held
+/// shares of full track and the pacing's sets depend on the way there. A table not reaching the
+/// line reads as its default, as the code that grows it fills it.
+#[derive(Clone, Debug, PartialEq)]
+struct LineRates {
+    tph: [f32; SLOTS],
+    tph_rest: [f32; SLOTS],
+    pace: [f32; SLOTS],
+    pace_rest: [f32; SLOTS],
+    pace_in: [PaceIn; SLOTS],
+    pace_in_rest: [PaceIn; SLOTS],
+    trains: Option<[u32; 5]>,
+    /// phase, split, and the weekends' (`TrackWorld::phases`)
+    phases: [[f32; SLOTS]; 4],
+    /// its `settle_kept` and `settle_kept_rest` entries
+    kept: [Vec<(u32, usize, u32, u64, u32)>; 2],
+}
+
+/// T-3646: an edit's effect on the settled state, to undo exactly: per line it moved, its state
+/// after the edit (what the undo expects to find) and before it (what the undo puts back), and the
+/// weekends' `rest_solved` the same way. An undo that finds anything else (an edit off the history
+/// came between, the load's cap lowering) settles instead.
+#[derive(Clone, Debug, Default)]
+struct Rates {
+    lines: Vec<(u32, Option<LineRates>, Option<LineRates>)>,
+    rest_solved: (bool, bool),
+}
+
+/// One entry of the undo history: the step back (the inverse and what it puts back) and, for an edit
+/// off the history (the load's cap lowering, T-3528), the edit itself, which the redo of the edit
+/// before it makes again (`TrackWorld::step`). Such an entry is never undone by itself.
+#[derive(Clone, Debug)]
+struct Back {
+    step: (Op, Rates),
+    again: Option<Op>,
+}
+
+/// The lines an op sets, where it sets nothing but lines' trains, headways and rows; None for any
+/// other op (track, stations, the game's rows or hours, a line's path).
+fn op_lines(op: &Op) -> Option<Vec<u32>> {
+    match op {
+        Op::TrainCounts { id, .. } | Op::AutoTrains { id, .. } | Op::Weekend { id, .. } | Op::Extra { id, .. } => Some(vec![*id]),
+        Op::Batch(v) => v.iter().map(op_lines).collect::<Option<Vec<_>>>().map(|v| v.concat()),
+        _ => None,
+    }
+}
+
+/// `next` folded into `all`: what either touched, costs from the first before and the last after.
+fn merge_results(all: &mut Option<EditResult>, next: EditResult) {
+    let Some(a) = all.as_mut() else {
+        *all = Some(next);
+        return;
+    };
+    fn join(a: &mut Vec<u32>, b: Vec<u32>) {
+        a.extend(b);
+        a.sort_unstable();
+        a.dedup();
+    }
+    let (d, n) = (&mut a.dirty, next.dirty);
+    join(&mut d.edges, n.edges);
+    join(&mut d.nodes, n.nodes);
+    d.crossings.extend(n.crossings);
+    join(&mut d.resources, n.resources);
+    join(&mut d.lines, n.lines);
+    join(&mut d.service.rebuilt, n.service.rebuilt);
+    join(&mut d.service.recomputed, n.service.recomputed);
+    join(&mut d.service.shared, n.service.shared);
+    join(&mut d.service.demand, n.service.demand);
+    a.cost_after = next.cost_after;
+    a.built_after = next.built_after;
+    a.charge += next.charge;
+}
+
+/// A line's departure split where the table does not reach it (as a load grows it).
+const SPLIT_NONE: [f32; SLOTS] = [0.5; SLOTS];
+
+/// `v[l] = x`, growing `v` with `none` only where `x` is not `none` (`LineRates` reads a table
+/// that does not reach a line as `none`).
+fn put_at<T: Copy + PartialEq>(v: &mut Vec<T>, l: usize, x: T, none: T) {
+    if v.len() <= l {
+        if x == none { return; }
+        v.resize(l + 1, none);
+    }
+    v[l] = x;
+}
+
 /// How far over the chosen headway the real one may run: a line's round trip moves a little with
 /// its own train count, and a train more for a few seconds would be noise (T-625).
 pub(crate) const AUTO_SLACK: f64 = 1.005;
@@ -152,8 +239,14 @@ pub struct EditResult {
 pub struct TrackWorld {
     pub net: Network,
     pub svc: Service,
-    undo: Vec<Op>,
-    redo: Vec<Op>,
+    undo: Vec<Back>,
+    /// each with the undo stack's length right after its undo (the entries above that are edits off
+    /// the history made since, which a redo takes back first) and the edits off the history its undo
+    /// took back, which its redo makes again (`step`)
+    redo: Vec<((Op, Rates), usize, Vec<Op>)>,
+    /// T-3646: the lines' states an undo or redo puts back in this commit (`Rates`), when it found
+    /// the state the step left.
+    restore_to: Option<(Vec<(u32, LineRates)>, bool)>,
     /// T-752: a line switching between counts and headways, whose counts this edit's settle keeps,
     /// and the levels it had no trains at (T-849: they take the headway's count, which the track
     /// trims as any headway line's)
@@ -177,9 +270,8 @@ pub struct TrackWorld {
     /// T-3388: per line and level, what `pace_merges` last paced it from. Not saved: a load takes
     /// the saved pacing as it is.
     pace_in: Vec<[PaceIn; SLOTS]>,
-    /// T-3584: the weekends' pacing and what it was paced from, kept with `svc_rest` (the weekdays'
-    /// start them at the first weekend settle). Not saved.
-    pub(crate) pace_rest: Vec<[f32; SLOTS]>,
+    /// T-3584: what the weekends' pacing (`Network::line_pace_rest`) was paced from, kept with
+    /// `svc_rest` (the weekdays' start them at the first weekend settle). Not saved.
     pace_in_rest: Vec<[PaceIn; SLOTS]>,
 }
 
@@ -193,7 +285,7 @@ pub enum ChargeError {
 
 impl TrackWorld {
     pub fn new(net: Network) -> TrackWorld {
-        let mut w = TrackWorld { net, svc: Service::default(), undo: vec![], redo: vec![], switching: None, settle_scope: None, settle_edited: vec![], settle_edited_rest: vec![], svc_rest: None, weekend_as_saved: false, pace_in: vec![], pace_rest: vec![], pace_in_rest: vec![] };
+        let mut w = TrackWorld { net, svc: Service::default(), undo: vec![], redo: vec![], restore_to: None, switching: None, settle_scope: None, settle_edited: vec![], settle_edited_rest: vec![], svc_rest: None, weekend_as_saved: false, pace_in: vec![], pace_in_rest: vec![] };
         w.reload();
         w
     }
@@ -224,6 +316,11 @@ impl TrackWorld {
             self.place_departures(&all);
             self.pin_twin_phases();
             self.net.phases_placed = true;
+        }
+        // T-3735: the weekends' too, where a save carried none (`LWP1`)
+        if !self.net.rest_solved || self.net.line_phase_rest.is_empty() {
+            let all: Vec<u32> = (0..self.net.line_count() as u32).collect();
+            self.place_weekend(&all);
         }
         self.retime();
     }
@@ -329,6 +426,67 @@ impl TrackWorld {
         super::spacing::place(&self.net, &self.svc, lines, &mut phase, &mut split);
         self.net.line_phase = phase;
         self.net.line_split = split;
+    }
+
+    /// T-3735: `place_departures` on weekends, into `line_phase_rest` and `line_split_rest`: those of
+    /// `lines` that run other rates then (`Network::runs_own_weekend`) are placed among every line's
+    /// weekend trains, on the weekends' rates, headways and pacing swapped in as `settle_weekend`
+    /// swaps them. The service placed on is the weekdays': weekend trains run its timetables. Every
+    /// other line keeps a copy of its weekday phases and splits, as it runs its weekday departures.
+    fn place_weekend(&mut self, lines: &[u32]) {
+        if !self.net.rest_solved {
+            self.net.line_phase_rest.clear();
+            self.net.line_split_rest.clear();
+            return;
+        }
+        let n = self.net.line_count();
+        let own: Vec<bool> = (0..n).map(|l| self.net.runs_own_weekend(l)).collect();
+        let before = (std::mem::take(&mut self.net.line_phase_rest), std::mem::take(&mut self.net.line_split_rest));
+        let copy = |net: &Network, own: &[bool], phase: &mut Vec<[f32; SLOTS]>, split: &mut Vec<[f32; SLOTS]>, from: &(Vec<[f32; SLOTS]>, Vec<[f32; SLOTS]>)| {
+            phase.resize(n, [0.0; SLOTS]);
+            split.resize(n, [0.5; SLOTS]);
+            for l in 0..n {
+                let (p, s) = if own[l] { (from.0.get(l), from.1.get(l)) } else { (None, None) };
+                phase[l] = p.copied().unwrap_or_else(|| net.line_phase_of(l as u32));
+                split[l] = s.copied().unwrap_or_else(|| net.line_split_of(l as u32));
+            }
+        };
+        let (mut phase, mut split) = (vec![], vec![]);
+        copy(&self.net, &own, &mut phase, &mut split, &before);
+        let todo: Vec<u32> = lines.iter().copied().filter(|&l| own.get(l as usize) == Some(&true)).collect();
+        let twins = self.net.line_twin.iter().enumerate().any(|(t, x)| matches!(x, Twin::Of(_)) && own.get(t) == Some(&true));
+        if !todo.is_empty() || twins {
+            let counts = self.weekend_own();
+            let week = self.swap_in_weekend(&counts);
+            std::mem::swap(&mut self.net.line_tph, &mut self.net.line_tph_rest);
+            let paced = !self.net.line_pace_rest.is_empty();
+            if paced { std::mem::swap(&mut self.net.line_pace, &mut self.net.line_pace_rest); }
+            std::mem::swap(&mut self.net.line_phase, &mut phase);
+            std::mem::swap(&mut self.net.line_split, &mut split);
+            // (the lattices read while placing are the weekends', in the weekdays' fields)
+            self.net.rest_solved = false;
+            self.place_departures(&todo);
+            self.pin_twin_phases();
+            self.net.rest_solved = true;
+            std::mem::swap(&mut self.net.line_phase, &mut phase);
+            std::mem::swap(&mut self.net.line_split, &mut split);
+            if paced { std::mem::swap(&mut self.net.line_pace, &mut self.net.line_pace_rest); }
+            std::mem::swap(&mut self.net.line_tph, &mut self.net.line_tph_rest);
+            self.put_back_weekdays(week);
+            // a line placed alongside (its spare time moved) that runs its weekday pattern keeps it
+            let placed = (phase, split);
+            let (mut p2, mut s2) = (vec![], vec![]);
+            copy(&self.net, &own, &mut p2, &mut s2, &placed);
+            (phase, split) = (p2, s2);
+        }
+        let moved: Vec<u32> = (0..n as u32).filter(|&l| {
+            let i = l as usize;
+            before.0.get(i) != phase.get(i) || before.1.get(i) != split.get(i)
+        }).filter(|&l| own[l as usize]).collect();
+        self.net.line_phase_rest = phase;
+        self.net.line_split_rest = split;
+        // their weekend departures are drawn again
+        self.svc.note_changed(&moved);
     }
 
     /// The bus lines timed again (their street speeds changed, T-1577); nothing else is touched.
@@ -751,22 +909,9 @@ impl TrackWorld {
         (!self.net.same_places(l, c, t) || own_headway).then_some(c)
     }
 
-    /// T-3521: a headway line's headways on weekends (`line_auto` while the weekends settle): the
-    /// weekdays' at its percent (`weekend_headway`), none where its weekend counts are set by hand
-    /// (they run as a count line's, bar the headways stepped to, T-3557). None for a count line.
-    /// At the line's five places (`params::places`).
+    /// `Network::weekend_auto`.
     pub(crate) fn weekend_auto(&self, l: usize) -> Option<[u32; 5]> {
-        let a = self.net.auto_of(l)?;
-        match self.net.line_weekend.get(l).copied().unwrap_or_default() {
-            // a headway stepped to by hand keeps the cap on the trains set to run it (T-3557); a level
-            // without one runs as a count line
-            Weekend { counts: Some(_), headways, .. } => {
-                let h = places(headways, self.net.line_x[l].weekend_headways);
-                (!self.net.same_places(l, h, [0; 5])).then_some(h)
-            }
-            Weekend { share: 100, .. } => Some(a),
-            Weekend { share: p, .. } => Some(a.map(|h| weekend_headway(h, p))),
-        }
+        self.net.weekend_auto(l)
     }
 
     /// T-3521: the weekends' headways in `line_auto` for the lines in `own` (`weekend_own`), so
@@ -871,7 +1016,7 @@ impl TrackWorld {
                 self.net.line_pace = week_pace.clone();
                 self.pace_in = week_pace_in.clone();
             } else {
-                self.net.line_pace = std::mem::take(&mut self.pace_rest);
+                self.net.line_pace = std::mem::take(&mut self.net.line_pace_rest);
                 self.pace_in = std::mem::take(&mut self.pace_in_rest);
             }
             self.settle_edited = std::mem::take(&mut self.settle_edited_rest);
@@ -884,7 +1029,7 @@ impl TrackWorld {
                 self.settle_counts(full);
             }
             self.pace_in.iter_mut().flatten().for_each(|p| p.fresh = false);
-            self.pace_rest = std::mem::replace(&mut self.net.line_pace, week_pace);
+            self.net.line_pace_rest = std::mem::replace(&mut self.net.line_pace, week_pace);
             self.pace_in_rest = std::mem::replace(&mut self.pace_in, week_pace_in);
             self.net.line_tph_rest.clone_from(&self.net.line_tph);
             // a loop's counts set by hand were made even (as its weekday counts are), which it keeps
@@ -1062,7 +1207,7 @@ impl TrackWorld {
     }
 
     pub fn can_undo(&self) -> bool {
-        !self.undo.is_empty()
+        self.undo.iter().any(|b| b.again.is_none())
     }
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
@@ -1076,15 +1221,30 @@ impl TrackWorld {
                 _ => false,
             }
         }
-        (if redo { self.redo.last() } else { self.undo.last() }).is_some_and(only_counts)
+        if redo {
+            self.redo.last().is_some_and(|s| only_counts(&s.0 .0))
+        } else {
+            self.undo.iter().rev().find(|b| b.again.is_none()).is_some_and(|b| only_counts(&b.step.0))
+        }
     }
 
     /// Apply, validate, recompute. On problems nothing changes and the problems come back.
     pub fn apply(&mut self, op: Op) -> Result<EditResult, Vec<Issue>> {
         let (r, inv) = self.commit(op)?;
-        self.undo.push(inv);
+        self.undo.push(Back { step: inv, again: None });
         self.redo.clear();
         Ok(r)
+    }
+
+    /// The departures as placed (phases and splits, weekdays and weekends), to put back where an
+    /// edit is rolled back (T-1925).
+    fn phases(&self) -> [Vec<[f32; SLOTS]>; 4] {
+        let n = &self.net;
+        [n.line_phase.clone(), n.line_split.clone(), n.line_phase_rest.clone(), n.line_split_rest.clone()]
+    }
+    fn set_phases(&mut self, p: [Vec<[f32; SLOTS]>; 4]) {
+        let n = &mut self.net;
+        [n.line_phase, n.line_split, n.line_phase_rest, n.line_split_rest] = p;
     }
 
     /// Apply an edit and pay for it: its construction charge plus `extra`, evaluated on the
@@ -1099,7 +1259,7 @@ impl TrackWorld {
     /// `apply_paid` with the track's charge set by `price` on the edited network, not the rise in
     /// built value (T-3059: a rebuild pays the full new price).
     pub fn apply_priced(&mut self, op: Op, cash: f64, final_: bool, extra: &dyn Fn(&TrackWorld) -> f64, price: Option<&dyn Fn(&TrackWorld) -> f64>) -> Result<(EditResult, f64), ChargeError> {
-        let phases = (self.net.line_phase.clone(), self.net.line_split.clone());
+        let phases = self.phases();
         let (mut r, inv) = self.commit(op).map_err(ChargeError::Issues)?;
         if let Some(price) = price {
             r.charge = price(self);
@@ -1109,13 +1269,13 @@ impl TrackWorld {
         if need > 1e-9 && need > cash + 1e-6 {
             let _ = self.restore(inv);
             // T-1925: and the departures as they were
-            (self.net.line_phase, self.net.line_split) = phases;
+            self.set_phases(phases);
             return Err(ChargeError::Money { need, have: cash });
         }
         if final_ {
             self.undo.clear();
         } else {
-            self.undo.push(inv);
+            self.undo.push(Back { step: inv, again: None });
         }
         self.redo.clear();
         Ok((r, x))
@@ -1124,14 +1284,25 @@ impl TrackWorld {
     /// T-3528: an edit the game makes for the player (the cap lowering on load): applied and paid as
     /// `apply_paid`, but on neither history, so an undo takes back the player's own last edit.
     pub fn apply_unrecorded(&mut self, op: Op, cash: f64, extra: &dyn Fn(&TrackWorld) -> f64) -> Result<(EditResult, f64), ChargeError> {
-        let phases = (self.net.line_phase.clone(), self.net.line_split.clone());
+        self.apply_off_history(op, cash, extra, false)
+    }
+
+    /// `apply_unrecorded`, and T-3646, where `with_edit`: belonging to the player's edit before it, so
+    /// that edit's undo takes it back and its redo makes it again (the load's cap lowering, which can
+    /// come after the first edits). Without, it stays whatever the history does (a removed fare area).
+    pub fn apply_off_history(&mut self, op: Op, cash: f64, extra: &dyn Fn(&TrackWorld) -> f64, with_edit: bool) -> Result<(EditResult, f64), ChargeError> {
+        let phases = self.phases();
+        let again = op.clone();
         let (r, inv) = self.commit(op).map_err(ChargeError::Issues)?;
         let x = extra(self);
         let need = r.charge + x;
         if need > 1e-9 && need > cash + 1e-6 {
             let _ = self.restore(inv);
-            (self.net.line_phase, self.net.line_split) = phases;
+            self.set_phases(phases);
             return Err(ChargeError::Money { need, have: cash });
+        }
+        if with_edit && (!self.undo.is_empty() || !self.redo.is_empty()) {
+            self.undo.push(Back { step: inv, again: Some(again) });
         }
         Ok((r, x))
     }
@@ -1139,34 +1310,84 @@ impl TrackWorld {
     /// Undo (or redo) and pay `extra` as `apply_paid` does: undoing a line's removal can need
     /// trains again. Nothing changes if it is refused.
     pub fn step_paid(&mut self, redo: bool, cash: f64, extra: &dyn Fn(&TrackWorld) -> f64) -> Option<Result<(EditResult, f64), ChargeError>> {
-        let op = if redo { self.redo.pop()? } else { self.undo.pop()? };
-        let back = |w: &mut TrackWorld, op: Op| if redo { w.redo.push(op) } else { w.undo.push(op) };
-        let phases = (self.net.line_phase.clone(), self.net.line_split.clone());
-        Some(match self.restore(op.clone()) {
-            Ok((mut r, inv)) => {
+        let phases = self.phases();
+        Some(match self.step(redo)? {
+            Ok(mut r) => {
                 // what an undo or redo restores was paid for or removed before: only the trains
                 // it needs are charged, never the track (a removed built stretch comes back free)
                 let need = extra(self);
                 if need > 1e-9 && need > cash + 1e-6 {
-                    let _ = self.restore(inv);
-                    (self.net.line_phase, self.net.line_split) = phases;
-                    back(self, op);
+                    // the step the other way takes it back as exactly
+                    let _ = self.step(!redo);
+                    self.set_phases(phases);
                     Err(ChargeError::Money { need, have: cash })
                 } else {
-                    if redo {
-                        self.undo.push(inv);
-                    } else {
-                        self.redo.push(inv);
-                    }
                     r.charge = 0.0;
                     Ok((r, need))
                 }
             }
-            Err(e) => {
-                back(self, op);
-                Err(ChargeError::Issues(e))
-            }
+            Err(e) => Err(ChargeError::Issues(e)),
         })
+    }
+
+    /// One undo (or redo). T-3646: the edits off the history made since the step's edit (above it on
+    /// the undo stack) are taken back exactly first, so the step finds the state it left and puts back
+    /// exactly what it moved. An undo then makes them again (T-3528: an undo takes back the player's
+    /// edit, not the game's), but for those setting a line the undone edit set, or all where that
+    /// edit changed more than lines, as they were made for the edit's state; its redo takes back the
+    /// ones made since and makes them all again after the edit, on the state they were made on.
+    /// The result covers all of it. On problems nothing changes.
+    fn step(&mut self, redo: bool) -> Option<Result<EditResult, Vec<Issue>>> {
+        let base = if redo { self.redo.last()?.1 } else { self.undo.iter().rposition(|b| b.again.is_none())? + 1 };
+        let mut all: Option<EditResult> = None;
+        let mut again = vec![];
+        while self.undo.len() > base {
+            let Some(b) = self.undo.pop() else { break };
+            let Some(op) = b.again.clone() else { self.undo.push(b); break };
+            match self.restore(b.step.clone()) {
+                Ok((r, _)) => {
+                    merge_results(&mut all, r);
+                    again.push(op);
+                }
+                Err(e) => {
+                    self.undo.push(b);
+                    self.make_again(&mut all, again);
+                    return Some(Err(e));
+                }
+            }
+        }
+        again.reverse();
+        let (step, after) = if redo { self.redo.pop().map(|s| (s.0, s.2))? } else { (self.undo.pop()?.step, vec![]) };
+        match self.restore(step.clone()) {
+            Ok((r, inv)) => {
+                merge_results(&mut all, r);
+                if redo {
+                    self.undo.push(Back { step: inv, again: None });
+                    self.make_again(&mut all, after);
+                } else {
+                    let set = op_lines(&step.0);
+                    let keep: Vec<Op> = again.iter().filter(|o| set.as_ref().is_some_and(|s| op_lines(o).is_some_and(|l| l.iter().all(|x| !s.contains(x))))).cloned().collect();
+                    self.redo.push((inv, self.undo.len(), again));
+                    self.make_again(&mut all, keep);
+                }
+                Some(Ok(all.expect("a step's result")))
+            }
+            Err(e) => {
+                if redo { self.redo.push((step, base, after)) } else { self.undo.push(Back { step, again: None }) }
+                self.make_again(&mut all, again);
+                Some(Err(e))
+            }
+        }
+    }
+
+    /// Edits off the history made again in order, each kept on the undo stack.
+    fn make_again(&mut self, all: &mut Option<EditResult>, again: Vec<Op>) {
+        for op in again {
+            if let Ok((r, inv)) = self.commit(op.clone()) {
+                merge_results(all, r);
+                self.undo.push(Back { step: inv, again: Some(op) });
+            }
+        }
     }
 
     /// What an edit would do to the track, without doing it: applied, measured and rolled back. The
@@ -1192,11 +1413,11 @@ impl TrackWorld {
 
     /// Inspect the derived constructed state, then restore it without spending or undo edits.
     pub fn trial_with<T>(&mut self, op: Op, inspect: impl FnOnce(&TrackWorld) -> T) -> Result<(EditResult, T), Vec<Issue>> {
-        let phases = (self.net.line_phase.clone(), self.net.line_split.clone());
+        let phases = self.phases();
         let (r, inv) = self.commit(op)?;
         let value = inspect(self);
         let _ = self.restore(inv);
-        (self.net.line_phase, self.net.line_split) = phases;
+        self.set_phases(phases);
         Ok((r, value))
     }
 
@@ -1217,42 +1438,116 @@ impl TrackWorld {
     }
 
     pub fn undo(&mut self) -> Option<Result<EditResult, Vec<Issue>>> {
-        let op = self.undo.pop()?;
-        Some(match self.restore(op.clone()) {
-            Ok((r, inv)) => {
-                self.redo.push(inv);
-                Ok(r)
-            }
-            Err(e) => {
-                self.undo.push(op);
-                Err(e)
-            }
-        })
+        self.step(false)
     }
 
     pub fn redo(&mut self) -> Option<Result<EditResult, Vec<Issue>>> {
-        let op = self.redo.pop()?;
-        Some(match self.restore(op.clone()) {
-            Ok((r, inv)) => {
-                self.undo.push(inv);
-                Ok(r)
-            }
-            Err(e) => {
-                self.redo.push(op);
-                Err(e)
-            }
-        })
+        self.step(true)
     }
 
-    fn commit(&mut self, op: Op) -> Result<(EditResult, Op), Vec<Issue>> {
-        self.commit_with(op, true, true)
+    fn commit(&mut self, op: Op) -> Result<(EditResult, (Op, Rates)), Vec<Issue>> {
+        self.commit_recorded(op, true, None)
     }
 
     /// T-1649: an undo, a redo or a trial's rollback puts back what an edit took, so it is not
     /// checked afresh: track the saved game already had problems on (an old save under a newer
     /// water mask) would otherwise make the restore refuse, leaving a trial's deletions in place.
-    fn restore(&mut self, op: Op) -> Result<(EditResult, Op), Vec<Issue>> {
-        self.commit_with(op, false, true)
+    /// T-3646: and the rates, pacing and departures the edit moved, as they were, where it finds
+    /// them as the edit left them.
+    fn restore(&mut self, step: (Op, Rates)) -> Result<(EditResult, (Op, Rates)), Vec<Issue>> {
+        let (op, rates) = step;
+        self.commit_recorded(op, false, Some(&rates))
+    }
+
+    /// `commit_with` with services, and what it moved (`Rates`) for its inverse to put back;
+    /// `back`: what this commit itself puts back (an undo, redo or rollback).
+    fn commit_recorded(&mut self, op: Op, checked: bool, back: Option<&Rates>) -> Result<(EditResult, (Op, Rates)), Vec<Issue>> {
+        let before = self.line_rates_all();
+        let solved = self.net.rest_solved;
+        self.restore_to = back.and_then(|b| self.found(b, &before));
+        let r = self.commit_with(op, checked, true);
+        self.restore_to = None;
+        let (r, inv) = r?;
+        let after = self.line_rates_all();
+        let n = before.len().max(after.len());
+        let lines = (0..n).filter_map(|l| {
+            let (b, a) = (before.get(l).cloned().flatten(), after.get(l).cloned().flatten());
+            (b != a).then_some((l as u32, a, b))
+        }).collect();
+        Ok((r, (inv, Rates { lines, rest_solved: (self.net.rest_solved, solved) })))
+    }
+
+    /// T-3646: what `back` puts back, if the lines it names are as it expects (`now`, from
+    /// `line_rates_all`); None otherwise, and the commit settles as an edit does.
+    fn found(&self, back: &Rates, now: &[Option<LineRates>]) -> Option<(Vec<(u32, LineRates)>, bool)> {
+        if back.rest_solved.0 != self.net.rest_solved || !back.lines.iter().all(|(l, want, _)| now.get(*l as usize).cloned().flatten() == *want) {
+            return None;
+        }
+        Some((back.lines.iter().filter_map(|(l, _, set)| set.clone().map(|s| (*l, s))).collect(), back.rest_solved.1))
+    }
+
+    /// T-3646: each line's `LineRates`, None for a line not there.
+    fn line_rates_all(&self) -> Vec<Option<LineRates>> {
+        let n = &self.net;
+        let mut kept: Vec<[Vec<(u32, usize, u32, u64, u32)>; 2]> = vec![Default::default(); n.line_count()];
+        for (k, list) in [&n.settle_kept, &n.settle_kept_rest].into_iter().enumerate() {
+            for e in list {
+                if let Some(v) = kept.get_mut(e.0 as usize) { v[k].push(*e); }
+            }
+        }
+        let z = [0.0; SLOTS];
+        let p = [PaceIn::default(); SLOTS];
+        (0..n.line_count()).map(|l| n.line_ok(l as u32).then(|| LineRates {
+            tph: n.line_tph[l],
+            tph_rest: n.line_tph_rest.get(l).copied().unwrap_or(z),
+            pace: n.line_pace.get(l).copied().unwrap_or(z),
+            pace_rest: n.line_pace_rest.get(l).copied().unwrap_or(z),
+            pace_in: self.pace_in.get(l).copied().unwrap_or(p),
+            pace_in_rest: self.pace_in_rest.get(l).copied().unwrap_or(p),
+            trains: n.trains_of(l),
+            phases: [(&n.line_phase, z), (&n.line_split, SPLIT_NONE), (&n.line_phase_rest, z), (&n.line_split_rest, SPLIT_NONE)].map(|(v, d)| v.get(l).copied().unwrap_or(d)),
+            kept: std::mem::take(&mut kept[l]),
+        })).collect()
+    }
+
+    /// T-3646: `restore_to`'s rates, pacing, trains and what the settle kept put back; the lines.
+    fn put_rates(&mut self, set: &[(u32, LineRates)]) -> Vec<u32> {
+        let count = self.net.line_count();
+        let lines: Vec<u32> = set.iter().map(|e| e.0).filter(|&l| (l as usize) < count).collect();
+        for (l, r) in set.iter().filter(|e| (e.0 as usize) < count) {
+            let i = *l as usize;
+            let n = &mut self.net;
+            n.line_tph[i] = r.tph;
+            put_at(&mut n.line_tph_rest, i, r.tph_rest, [0.0; SLOTS]);
+            put_at(&mut n.line_pace, i, r.pace, [0.0; SLOTS]);
+            put_at(&mut n.line_pace_rest, i, r.pace_rest, [0.0; SLOTS]);
+            put_at(&mut self.pace_in, i, r.pace_in, [PaceIn::default(); SLOTS]);
+            put_at(&mut self.pace_in_rest, i, r.pace_in_rest, [PaceIn::default(); SLOTS]);
+            match r.trains {
+                Some(t) => self.net.set_trains_of(i, Some(t)),
+                None => self.net.line_trains[i] = None,
+            }
+        }
+        let n = &mut self.net;
+        n.settle_kept.retain(|e| !lines.contains(&e.0));
+        n.settle_kept_rest.retain(|e| !lines.contains(&e.0));
+        for (_, r) in set.iter().filter(|e| lines.contains(&e.0)) {
+            n.settle_kept.extend_from_slice(&r.kept[0]);
+            n.settle_kept_rest.extend_from_slice(&r.kept[1]);
+        }
+        lines
+    }
+
+    /// T-3646: the departures `put_rates` left to the placing, as they were.
+    fn put_phases(&mut self, set: &[(u32, LineRates)]) {
+        let count = self.net.line_count();
+        let n = &mut self.net;
+        for (l, r) in set.iter().filter(|e| (e.0 as usize) < count) {
+            let i = *l as usize;
+            for ((v, d), x) in [(&mut n.line_phase, [0.0; SLOTS]), (&mut n.line_split, SPLIT_NONE), (&mut n.line_phase_rest, [0.0; SLOTS]), (&mut n.line_split_rest, SPLIT_NONE)].into_iter().zip(r.phases) {
+                put_at(v, i, x, d);
+            }
+        }
     }
 
     /// `service`: rebuild the services the edit touches (every real edit; a `trial` skips it).
@@ -1330,25 +1625,68 @@ impl TrackWorld {
         // The capacity pass rebuilds only around what was touched (T-050).
         let mut cap_nodes = der.nodes.clone();
         cap_nodes.extend_from_slice(&t.stations);
-        let settles = cap_dirty || !lines.is_empty() || !t.schedules.is_empty();
+        // T-3646: an undo or redo that finds the state its step left puts back the rates, pacing and
+        // trains the step moved, so the settle below starts from a settled state and keeps it
+        let set = self.restore_to.take();
+        let mut schedules = t.schedules.clone();
+        if let Some((set, _)) = &set {
+            schedules.extend(set.iter().map(|e| e.0).filter(|&l| (l as usize) < self.net.line_count()));
+            schedules.sort_unstable();
+            schedules.dedup();
+        }
+        // T-3646: the lines sharing track with what the edit changed, as they did before it: a line
+        // removed, or moved off their track, shares none with them after it, yet they may run more
+        let mut changed: Vec<u32> = lines.iter().chain(&t.schedules).copied().collect();
+        changed.sort_unstable();
+        changed.dedup();
+        let mut was_sharing = vec![];
+        for r in 0..self.svc.cap.res.len() {
+            let us = self.svc.cap.users_of(r);
+            if us.iter().any(|u| changed.binary_search(&u.line).is_ok()) {
+                was_sharing.extend(us.iter().map(|u| u.line));
+            }
+        }
+        let settles = cap_dirty || !lines.is_empty() || !schedules.is_empty();
         let before = settles.then(|| self.demand_view());
-        let mut svc = self.svc.update_scoped(&self.net, &lines, &t.schedules, cap_dirty, Some((&der.edges, &cap_nodes)));
-        if settles { self.mirror_weekend(&lines, &t.schedules, cap_dirty, &der.edges, &cap_nodes); }
+        // after the demand view, so what is put back counts for demand where it moved
+        let restored = set.map(|(set, solved)| {
+            let l = self.put_rates(&set);
+            // weekends settled on their own or not, as before the step: where that changes, the
+            // weekend service is worked out again at the next weekend settle, as after a load
+            if solved != self.net.rest_solved {
+                self.net.rest_solved = solved;
+                self.svc_rest = None;
+            }
+            (set, l)
+        });
+        let mut svc = self.svc.update_scoped(&self.net, &lines, &schedules, cap_dirty, Some((&der.edges, &cap_nodes)));
+        if settles { self.mirror_weekend(&lines, &schedules, cap_dirty, &der.edges, &cap_nodes); }
         if let Some(before) = before {
             // T-752: a switch between counts and headways never buys or sells a train
             self.switching = switch;
             // the rescheduled lines themselves too: a bus or ferry line uses no capacity resource, so
             // `svc.shared` never names it, and its new count would never be settled into a rate (T-3704)
             let mut seeds = lines.clone();
-            seeds.extend(svc.rebuilt.iter().chain(&svc.recomputed).chain(&svc.shared).chain(&t.weekend).chain(&t.schedules).copied());
+            seeds.extend(svc.rebuilt.iter().chain(&svc.recomputed).chain(&svc.shared).chain(&t.weekend).chain(&schedules).chain(&was_sharing).copied());
             self.settle_scope = Some(self.sharing_closure(&seeds));
-            let mut edited: Vec<u32> = lines.iter().chain(&t.schedules).copied().collect();
-            edited.sort_unstable();
-            edited.dedup();
             // the levels a line ran no trains at, or every level of a line the edit made (or brought back)
-            self.settle_edited = none_at(&edited, 0);
-            self.settle_edited_rest = none_at(&edited, 1);
-            let counts = self.settle_train_counts(false);
+            self.settle_edited = none_at(&changed, 0);
+            self.settle_edited_rest = none_at(&changed, 1);
+            let counts = match &restored {
+                // T-3646: put back as settled, so not settled again: a settle from there is no
+                // no-op where a line is kept off its fleet by having been left out of a scope (a
+                // switch to headways keeps its counts, T-752, until a settle steps it)
+                Some((_, l)) => {
+                    // as a settle leaves every line's (a rebuilt service starts from the counts set)
+                    for id in (0..self.net.line_count()).filter(|&i| self.net.line_ok(i as u32) && self.net.line_trains[i].is_some()) {
+                        let t = self.net.slot_trains(id);
+                        if let Some(s) = self.svc.lines.get_mut(id) { s.trains = t; }
+                    }
+                    self.svc.note_changed(l);
+                    l.clone()
+                }
+                None => self.settle_train_counts(false),
+            };
             self.settle_scope = None;
             self.settle_edited.clear();
             self.settle_edited_rest.clear();
@@ -1379,6 +1717,15 @@ impl TrackWorld {
         // T-1925: the lines the edit changed take departure slots among the others
         self.place_departures(&direct);
         self.pin_twin_phases();
+        // T-3735: and on weekends, with the lines whose weekends alone the edit changed
+        let mut weekend = direct.clone();
+        weekend.extend_from_slice(&t.weekend);
+        weekend.sort_unstable();
+        weekend.dedup();
+        self.place_weekend(&weekend);
+        if let Some((set, _)) = &restored {
+            self.put_phases(set);
+        }
         self.retime();
         let mut resources = vec![];
         for (r, res) in self.svc.cap.res.iter().enumerate() {
@@ -1701,7 +2048,11 @@ impl TrackWorld {
             lines.dedup();
         }
         for l in lines {
-            if self.net.line_ok(l) && self.net.line_path(l).iter().all(|&p| self.net.edge_ok(path_edge(p))) {
+            // T-3911: an edit of a rail line with a port among its stops is refused; loading such a save
+            // (`derive`) keeps the line as it is
+            if self.net.line_ok(l) && !self.net.is_bus(l) && !self.net.is_ferry(l) &&self.net.line_stops(l).iter().any(|&s| self.net.is_port(s)) {
+                issues.push(Issue::PortStop { line: l });
+            } else if self.net.line_ok(l) && self.net.line_path(l).iter().all(|&p| self.net.edge_ok(path_edge(p))) {
                 if let Err(i) = self.net.check_line(l) {
                     issues.push(i);
                 }

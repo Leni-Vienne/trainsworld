@@ -8,7 +8,7 @@ import { linesPending } from "../game/lineFigures";
 import { count } from "../game/format";
 import { clock, DEMAND_CAP } from "../game/clock";
 import { activeCity, cityById, viewedZone, type CityId } from "../game/cities";
-import { nextLeft, STAGE_TEXT } from "../game/loadBar";
+import { keepPlace, nextLeft, STAGE_TEXT, type BarPlace } from "../game/loadBar";
 import { editLeft, editPrior } from "../game/editLeft";
 import { loadFailText } from "../game/loadText";
 import { cityNames,demandIdle, demandStopped, loadFailure, loadLines, loadProgress, memoryResolve, oldestDownload, solveLeft, zoneFailures, zoneLoads, zoneSteps } from "../game/loading";
@@ -84,6 +84,12 @@ const editShown: Record<"all" | "view", { leftMs: number; at: number } | null> =
 effect(() => { if (!demandWork.value && !editHeld.peek()) editShown.all = editShown.view = null; });
 /** (`view`: to the zone in view's figures, for the tag saying they are being recomputed) */
 function afterChangeLeft(part: "all" | "view" = "all"): string {
+  const ms = shownLeft(part);
+  if (ms === null) return t("statusTag.leftUnknown");
+  return ms < 60_000 ? t("statusTag.leftUnderMinute") : t("statusTag.leftMinutes", { n: Math.round(ms / 60_000) });
+}
+/** the time left as the hover shows it, ms (`afterChangeLeft`), or null while it can't be told */
+function shownLeft(part: "all" | "view" = "all"): number | null {
   const now = performance.now();
   const w = demandWork.value;
   // (a load's solve, or one after memory was freed, has the load's estimate)
@@ -94,9 +100,29 @@ function afterChangeLeft(part: "all" | "view" = "all"): string {
   const was = editShown[part];
   if (est !== null) editShown[part] = { leftMs: nextLeft(was ? was.leftMs : null, est, was ? now - was.at : 0), at: now };
   const s = editShown[part];
-  if (!s) return t("statusTag.leftUnknown");
-  const ms = Math.max(0, s.leftMs - (now - s.at));
-  return ms < 60_000 ? t("statusTag.leftUnderMinute") : t("statusTag.leftMinutes", { n: Math.round(ms / 60_000) });
+  return s ? Math.max(0, s.leftMs - (now - s.at)) : null;
+}
+
+/** T-3868: since when trips have been calculated without a break (one edit's solve after another, a held edit
+ * included), and the bar's place in that wait. Units done measured the bar before: their times differ by ten
+ * times within a solve (a whole solve's last 42 of 60 units took 5 s of 210), and each edit started it at 0. */
+let solvingSince: number | null = null;
+let solvePlace: BarPlace = { best: 0 };
+let solveEnd = 0;
+effect(() => {
+  clearTimeout(solveEnd);
+  if (demandUpdating.value) solvingSince ??= performance.now();
+  // (a held edit's solve is sent just after the final before it: the same wait goes on)
+  else solveEnd = window.setTimeout(() => { if (!demandUpdating.peek()) { solvingSince = null; solvePlace = { best: 0 }; } }, 1000);
+});
+/** the share of that wait passed, by the time left the hover shows: what has passed over that and what is left;
+ * null while no time left is known */
+function timedShare(): number | null {
+  const left = solvingSince === null ? null : shownLeft();
+  if (left === null || solvingSince === null) return null;
+  const el = performance.now() - solvingSince;
+  tickWork();
+  return Math.min(0.97, keepPlace(solvePlace, el / Math.max(1, el + left)));
 }
 /** T-2613: terrain has been downloading for TERRAIN_SLOW_MS (grids and masks for the clock worker, or
  * the hillshade's tiles), so a quick download on a pan never flashes the tag */
@@ -155,12 +181,15 @@ let workTimer = 0;
 function tickWork() {
   workTick.value;
   if (!workTimer) workTimer = window.setInterval(() => {
-    if (demandUpdating.peek() && demandWork.peek()) workTick.value++;
+    if (demandUpdating.peek()) workTick.value++;
     else { clearInterval(workTimer); workTimer = 0; }
   }, 250);
 }
 /** results published so far of the running solve's, when one runs */
 function roundShare(): number | null {
+  // T-3868: by the time left, where it is known
+  const timed = demandUpdating.value ? timedShare() : null;
+  if (timed !== null) return timed;
   const { done, of } = demandStep.value;
   // T-2729: an edit's solve publishes only at each stage's end (its local solve while that is
   // awaited, then the whole one): the workers' units done instead, the unit in hand by its time
@@ -200,6 +229,10 @@ effect(() => {
   else if (!on && ticking) { clearInterval(ticking); ticking = 0; }
 });
 
+/** T-3884: zoomed out, no zone in view, while a whole solve of several zones runs: the tag says so (T-1851 ties it to
+ * the zone in view otherwise, and a solve nobody sees looked like lost work) */
+const wholeSolveUnseen = computed(() => !viewedZone.value && demandUpdating.value && demandScope.value > 1 && !demandHeld.value);
+
 export function StatusTag() {
   // T-149, T-172: a city loading (at startup, after a pan, or construction reaching it) says how
   // far it has got
@@ -222,6 +255,7 @@ export function StatusTag() {
     : load ? t("statusTag.loadingData")
     : terrain ? terrain
     : mapWait ? mapWait
+    : wholeSolveUnseen.value ? t("statusTag.recomputingCities", { count: count(demandSolving.value?.size ?? demandScope.value) })
     : !demandView.value ? (demandIdle.value ? null : t("statusTag.loadingDataDots")) // T-318: nothing to load over dead space
     // T-1493: the zone in view has figures but its bubbles are still on their way
     : bubblesWaiting.value ? t("statusTag.loadingDataDots")
@@ -248,6 +282,7 @@ export function StatusTag() {
   const onMap = !onTerrain && busy === mapWait;
   const base = onMap ? "" : onTerrain ? (terrainFailed ? t("statusTag.terrainFailTip") : "")
     : (loadFailure.value ? loadFailText(loadFailure.value) : undefined) ?? (zoneFailure ? zoneFailure : load && !loadingCardShown() ? t("statusTag.loadingTip", { cities: cityNames(load.cities), pct: Math.floor(load.fraction * 100), step: load.step })
+    : wholeSolveUnseen.value ? (demandWork.value && shownLeft() !== null ? afterChangeLeft() : "")
     : !demandView.value ? busy
     : bubblesWaiting.value ? ""
     : clickWait.value ? waitTip(clickWait.value)
@@ -256,6 +291,8 @@ export function StatusTag() {
     : behindDays.value >= 1 && busy === t("statusTag.behind", { count: behindDays.value }) && demandUpdating.value ? afterChangeLeft()
     // T-3599: the zone in view's trips recomputed after an edit
     : viewRecomputing.value && busy === recomputing() && demandUpdating.value && demandBehindFrom.value !== null ? afterChangeLeft("view")
+    // T-3876: a load's whole solve, timed by its workers' units as an edit's is
+    : viewRecomputing.value && busy === recomputing() && demandUpdating.value && demandWork.value && shownLeft() !== null ? afterChangeLeft()
     : "");
   const tip = [base, !onTerrain && clock.capped.value ? t("statusTag.capped", { cap: DEMAND_CAP }) : ""].filter(Boolean).join("\n") || undefined;
   const failed = onTerrain ? terrainFailed : !!loadFailure.value || !!zoneFailure;
@@ -266,6 +303,7 @@ export function StatusTag() {
     if (onMap) kind = "map";
     else if (onTerrain) { kind = "terrain"; const left = groundNet.value.pending + shadeDownloads.value; share = terrainPeak > 1 ? 1 - left / terrainPeak : null; }
     else if (load) { kind = "load"; share = load.fraction; }
+    else if (wholeSolveUnseen.value) share = roundShare();
     else if (!demandView.value) kind = "data";
     else if (bubblesWaiting.value) { kind = "bubbles"; share = zoneLoads.value.get(activeCity.value) ?? null; }
     else if (clickWait.value) { kind = "click"; share = zoneLoads.value.get(clickWait.value) ?? roundShare(); }

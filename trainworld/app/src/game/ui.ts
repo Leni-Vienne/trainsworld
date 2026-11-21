@@ -122,6 +122,8 @@ export interface DisplaySettings {
   zoomButtons: boolean;
   /** T-3765: the top bar's pause, 1x, 4x and custom-speed buttons instead of pause, slower, speed and faster (ui/TopBar.tsx `Speed`) */
   legacyTime: boolean;
+  /** T-3695: the mode split bars show the transit share by kind of line (game/transitModes.ts); off by default */
+  transitModes: boolean;
   /** T-2660: the timetable chart draws other lines' trains where they share its track or cross it */
   chartOtherLines: boolean;
   /** T-2838, T-3630: trips between cities are calculated (the market opens); per browser, since it is about the
@@ -179,8 +181,10 @@ const DEFAULT_DISPLAY: DisplaySettings = {
   rotateMap: false,
   zoomButtons: true,
   legacyTime: false,
+  transitModes: false,
   busOneWay: false,
-  bindNew: true,
+  // T-3814: a new player names stations independently (an existing one keeps on, below)
+  bindNew: false,
   chartOtherLines: true,
   intercityTrips: !mobileDevice(),
   modeShapes: { ...MODE_SHAPES },
@@ -211,6 +215,10 @@ function load(): Partial<{ tab: Tab; theme: Theme; shade: Shade; display: Partia
   }
 }
 const saved = load();
+/** T-3847: whether a game was saved here before (the remembered slot, workers/clockClient.ts) */
+function playedBefore(): boolean {
+  try { return !!localStorage.getItem("anitabuilder-save-slot"); } catch { return false; }
+}
 const oldDisplay = saved.display as (Partial<DisplaySettings> & { mobileIntercity?: boolean; lineLoad?: boolean; intercity?: boolean; stationRiders?: boolean; unbuiltColour?: string; trainLoadBasis?: string; complexView?: boolean; font?: unknown; trainLoad?: boolean; platformCrowds?: string }) | undefined;
 // `lineLoad` (the old width checkbox) and `intercity` (hide the longer-trip bubbles) are no longer settings (T-222), nor `stationRiders`
 // (the demand circles, T-482), nor `unbuiltColour` (T-1120), nor `trainLoadBasis` (T-164), nor
@@ -241,6 +249,12 @@ if ((saved.v ?? 1) < 12) delete migratedDisplay.lineBands;
 if ((saved.v ?? 1) < 14 && migratedDisplay.currency === "USD") delete migratedDisplay.currency;
 // Terrain shading became the default (Anita, 2026-11-17); the old default (off) was stored, so it is dropped once
 if ((saved.v ?? 1) < 15) delete migratedDisplay.hillshade;
+// T-3814: binding new stations went off by default; a player with anything stored and no choice of their own had it
+// on (the default from T-3759 until then), so they keep it
+if (Object.keys(saved).length && migratedDisplay.bindNew === undefined) migratedDisplay.bindNew = true;
+// T-3847: a browser with no sign of an earlier visit (no stored settings, no remembered save slot) starts on the
+// legacy time buttons; one that has played keeps the new bar until the player picks
+if (migratedDisplay.legacyTime === undefined && !Object.keys(saved).length && !playedBefore()) migratedDisplay.legacyTime = true;
 // T-3630: the phones-only toggle became a setting on every device; every computer had the old off stored, so only a
 // phone's choice carries over
 if (migratedDisplay.intercityTrips === undefined && mobileDevice() && _mobileIntercity !== undefined) migratedDisplay.intercityTrips = _mobileIntercity;
@@ -301,7 +315,7 @@ export function closeNetworkView() {
 /** A question waiting in a centered modal (T-096/T-113: removing something
  * constructed): `run` on the yes button, `stay` (if any) on the no button or Esc. `lines`: a row each
  * under the text, after the line's bullet (T-859: what a removal does to lines). */
-export const ask = signal<{ text: string; yes: string; no: string; run: () => void; stay?: () => void; lines?: { line: number; text: string }[] } | null>(null);
+export const ask = signal<{ text: string; yes: string; no: string; run: () => void; stay?: () => void; alt?: { label: string; run: () => void }; plain?: boolean; lines?: { line: number; text: string }[] } | null>(null);
 /** The selected line whose stops the map tool is editing. */
 export const lineDraft = signal<{ line: number | null; stops: number[] }>({ line: null, stops: [] });
 /** Stop editing is on (T-233): the line tool with a line to edit. The map then hides the demand
@@ -320,7 +334,7 @@ export const renameLinePrompt = signal<string | null>(null);
 /** How the Lines and Stations lists are sorted: the column clicked and its direction (T-310). Kept
  * while the page is open, as the list sort always was. */
 export interface ListSort<K extends string> { key: K; dir: 1 | -1 }
-export const lineSort = signal<ListSort<"name" | "city" | "riders" | "money" | "trains" | "near">>({ key: "riders", dir: -1 });
+export const lineSort = signal<ListSort<"name" | "kind" | "city" | "riders" | "money" | "trains" | "near">>({ key: "riders", dir: -1 });
 export const stationSort = signal<ListSort<"name" | "riders" | "near">>({ key: "riders", dir: -1 });
 /** The Money tab's Cities section (T-550): by name, train share, train rides a day or money a day. */
 export const citySort = signal<ListSort<"name" | "train" | "rides" | "money" | "points">>({ key: "rides", dir: -1 });

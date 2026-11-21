@@ -27,7 +27,7 @@ tests natively.
   Station placements swept along every piece, refusals counted by reason and by the joints under the platform: the ignored tests in `wasm/station_sweep_tests.rs` (a drawn network, and a save's network bytes in `T1964_NET`; T-1964).
   notes/T-040.md. Methods only tests and bins call (`set_line`, `set_edge`, `to_lonlat` and the
   like) sit in plain `impl` blocks, not in the WASM exports; the same holds for `DemandApi`,
-  `EverydayApi` and `IntercityApi`. A big file's tests are in its own `<file>/tests.rs`.
+  `EverydayApi` and `IntercityApi`. A big file's tests are in its own `<file>/tests.rs`; the track API's main tests are `wasm/tests.rs` (shared helpers) and `wasm/tests/<area>_tests.rs` (ground, lines, fleet, blueprint, drag, routes, strokes, platforms, stations, quad, groups, reach).
 - `src/track/bus.rs`: bus lines (T-1464, T-1465): the route (`BusRoute`: points with corner and road bits; `Poly` in road metres), its stops (`plan`: stations met, ends, crossings, about one every 2 km on the 400 m street grid, each with its stretch of route; `plan_spaced` for a line with its own spacing, T-2885), the trip by the road it crosses (`Pace`: the car's model, 90% of it, 28 s a stop, T-2904, constants in `streets.rs`; `profile`, `spaced_profile`); `wasm/bus.rs` its exports, tests in `wasm/bus_tests.rs`; notes/T-1464.md.
 - `src/track/ferry.rs`: ferry lines (T-2193): ports (stations with a berth), the route the app searched (`FerryRoute`: points with a kind and a speed), its check, the boat's speed limits and its trip with acceleration (`limits`, `profile`), its stops as a bus `Plan`; `wasm/ferry.rs` its exports, tests in `ferry/tests.rs` and `wasm/ferry_tests.rs`; Node check `checks/t2193-ferry.mjs`; docs/track-and-service.md 6.8.
 - `src/track/streets.rs`: the car's street speed by place (demand's `place_min_per_km`, kept equal by a test), a pack's grid of its zones' speeds (`StreetGrid`, `Streets` in the network, installed with `TrackApi::add_pack_streets`, T-1577), for a bus's speed.
@@ -37,7 +37,7 @@ tests natively.
 - `src/track/trace.rs`: a real railway's line as corners within a tolerance (T-727c), for
   `TrackApi::trace_route` and the real-network snap; `Tracer` runs it in steps (`RouteTrace` in
   WASM, T-754); notes/T-727.md.
-- The rest of `src/track/`: `net.rs` (the network: nodes, edges, stations and lines as flat arrays by stable id, with everything derived from them), `lanes.rs` (the tracks inside a piece, `Network::lanes`, and each node's move table, `Moves`, which routing, line checks, the flat-junction badge, junction capacity and the train guard read; the way single track runs, `edge_way`, from its run's joins to double track, `derive_ways`, `join_away`, T-3137; what turns around when the running side does, `flip_reversals`, T-3297, with `TrackWorld::flip_right_hand` in `world.rs` and `wasm/flip.rs`), `geom.rs` (alignment geometry: points of intersection with an arc fitted at each, straights between, ramps), `cross.rs` (where track crosses track, on a 1 km grid of edges), `bridge.rs` (a ground-level segment over water becomes a bridge, T-656), `roads.rs` (the road lines ground-level track crosses, fed tile by tile, T-1929), `capacity.rs` (resources, utilisation per demand level, Kingman's delay, holds), `profile.rs` (run-time profiles along a line's path under speed limits), `spacing.rs` (the phase of each line's departures, T-1925), `timing.rs` (each train's own timetable: a local's waits at passing stations and an express timed behind its local, worked out train by train after every settle, `retime`, T-3346 stage 2), `save.rs` (the network part of a save), `names.rs` (tidies station and line names from a real network, T-1442), `params.rs` (every tuning constant of the track model), `bench.rs` (the synthetic network `bin/track_bench.rs` times). Test modules sit beside their file (`frame_tests.rs`, `merc_tests.rs`, `related_tests.rs`, `transition_tests.rs`, `wasm/*_tests.rs`).
+- The rest of `src/track/`: `net.rs` (the network's types: nodes, edges, stations and lines as flat arrays by stable id; `impl Network` is in `net/`, split by method group, T-3873: `service.rs` service rows, train slots and hours, `store.rs` storage, ids, edge and line reads and bus and ferry reads, `stations.rs` stations and one-track queries with `set_station`, `check_station` and `platform_reach` (the part the track rework replaces whole), `edit.rs` setters and the ground, `derive.rs` everything derived and crossings, `validate.rs` validation and turns, `costs.rs` blueprint and built costs, `paths.rs` paths, stretches and routes), `lanes.rs` (the tracks inside a piece, `Network::lanes`, and each node's move table, `Moves`, which routing, line checks, the flat-junction badge, junction capacity and the train guard read; the way single track runs, `edge_way`, from its run's joins to double track, `derive_ways`, `join_away`, T-3137; what turns around when the running side does, `flip_reversals`, T-3297, with `TrackWorld::flip_right_hand` in `world.rs` and `wasm/flip.rs`), `geom.rs` (alignment geometry: points of intersection with an arc fitted at each, straights between, ramps), `cross.rs` (where track crosses track, on a 1 km grid of edges), `bridge.rs` (a ground-level segment over water becomes a bridge, T-656), `roads.rs` (the road lines ground-level track crosses, fed tile by tile, T-1929), `capacity.rs` (resources, utilisation per demand level, Kingman's delay, holds), `profile.rs` (run-time profiles along a line's path under speed limits), `spacing.rs` (the phase of each line's departures, T-1925), `timing.rs` (each train's own timetable: a local's waits at passing stations and an express timed behind its local, worked out train by train after every settle, `retime`, T-3346 stage 2), `save.rs` (the network part of a save), `names.rs` (tidies station and line names from a real network, T-1442), `params.rs` (every tuning constant of the track model), `bench.rs` (the synthetic network `bin/track_bench.rs` times). Test modules sit beside their file (`frame_tests.rs`, `merc_tests.rs`, `related_tests.rs`, `transition_tests.rs`, `wasm/*_tests.rs`).
 - `src/diagram.rs`: the network diagram's carry solve (`CarrySolver`: conjugate gradients with the black box multigrid,
   both axes as one f64x2), bit for bit `app/src/diagram/sheetLines.ts`' JavaScript one; behind feature `diagram` (on by
   default, so in the track module); the diagram worker loads it (T-2589, notes/T-2589.md).
@@ -98,7 +98,8 @@ for the demand workers (two modules from the one crate, notes/T-051.md).
   account's hour on the main thread: riders packed for the clock worker, platform crowds, T-164; the
   crowded stretches the map marks, T-2236, check `checks/t2236-crowding.mjs`),
   `complexLive.ts` (a complex's platform crowds and trains now, T-246), `purposes.ts` (the trip
-  purposes as shown, T-192), `trip.ts` (the trip explorer's state).
+  purposes as shown, T-192), `trip.ts` (the trip explorer's state), `transitModes.ts` (the mode split bars' transit
+  part by kind of line, T-3695).
 - Places and frames: `coords.ts` (world metres to lng/lat), `rings.ts` (ring box, point-in-ring and near-ring tests for the real-network snap and its router), `frame.ts` (the world frames, and the earth's radius and metres per degree) and `registry.json` (the
   one city registry, read by `cities.ts`, T-125; since T-776 the bundled index
   only), `market-rows.json` (each zone's world market row, fetched by `workers/demandClient.ts` beside
@@ -156,8 +157,8 @@ for the demand workers (two modules from the one crate, notes/T-051.md).
   (the track model's refusals in plain words), `editNote.ts` (what the last edits did to train trips and profit a day, shown under the view rows at the map's upper left once demand settles, T-2125, T-2237; drawn by ui/EditNote.tsx; `checks/t2125-edit-note.mjs`, `checks/t2682-editnote.mjs` for edits in a new game still loading or shown coarse), `profitEstimate.ts` (the network's profit change a day from a trains, headway or cars edit before demand solves it: exact running cost, fares by the wait term, the edit note's estimating state, T-2626; `checks/t2626-profit-estimate.mjs`), `openingDay.ts` (the lines on their opening day: the Lines tab's riders count-up and a "bung", not saved, T-1434; `checks/old/t1434-opening.mjs`), `openedZones.ts` (the zones the game has started in, reached or crossed with track, kept for the save, T-729, T-801), `trackZones.ts` (the zones built and blueprint track crosses, by coarse outline, from each network state, T-1047), `loading.ts` (what is loading, the startup gate and
   the clock hold, T-149, T-172; whether the start menu is up, T-677), `loadBar.ts` (the loading bar's
   stages, their shares and texts, each slot's remembered stage times and this browser's pace, T-1195;
-  the time left's count and text, T-1479), `editLeft.ts` (an edit's solve's time left for the status tag's hover,
-  from the workers' `work` and the last edit's pace, tail and gap, T-3599; `checks/t3599-time-left.mjs` against the
+  the time left's count and text, T-1479), `editLeft.ts` (an edit's or a load's solve's time left for the status tag's hover
+  and the loading card's bar, from the workers' `work` and the last edit's pace, tail and gap, T-3599, T-3876; `checks/t3599-time-left.mjs` against the
   real wait, `checks/t3599-replay.mjs` a recorded wait replayed with no browser),
   `memoryCheck.ts` (a save's memory estimate and the refusal when it will not fit, T-1197),
   `saveSafety.ts` (persistent storage, T-1214), `busy.ts` (the busy tag's
@@ -185,7 +186,7 @@ city's name in Japanese or Chinese from `place-names.json`, written by `tools/pl
   `styleReady.ts` (`styleUp`: MapLibre style calls are skipped while it has no style, a lost context, and reapplied on `style.load`, T-957),
   `moving.ts` (what runs at most every 100 ms while the camera moves: `PlaceThrottle`, T-1207), `lite.ts` (the lighter map and its auto switch, T-1207),
   `overlay.ts` (the overlay canvas and frame loop,
-  notes/T-015.md), `renderer.ts` (WebGL2 track, stations, trains; the strokes kept between changes in `strokeCache.ts`, T-1638, and simplified and culled in `strokeLod.ts`, T-1639, the few that show gathered into one buffer in `strokeGather.ts`, T-1644; its shaders and their shared constants are in `rendererShaders.ts`, the platform crowds' sums in `platformCrowds.ts`), `gl.ts` (shader compile, uniform lookup, zoom interpolation, the GPU timer, canvas sizing, and the camera: `Camera` for the flat map or the globe, `PROJECT_GLSL` and `setCamera` for the shaders, `mercToCss` and `clipToCss` to CSS px, `behindHorizon`; T-033; shared by the renderer, `demandOverlay.ts`, `gradeMarks.ts`, `transferBubbles.ts`, `shadeLayer.ts`, `overlay.ts` and the 2D overlays), `network.ts` (the renderer's
+  notes/T-015.md), `renderer.ts` (WebGL2 track, stations, trains: the class, its buffers and the picking; its constants and option types are in `rendererParts.ts`, each frame's passes in `rendererDraw.ts` (`drawFrame`, T-2374) and the stroke buffers' upload and level of detail in `rendererStrokes.ts`; the strokes kept between changes in `strokeCache.ts`, T-1638, and simplified and culled in `strokeLod.ts`, T-1639, the few that show gathered into one buffer in `strokeGather.ts`, T-1644; its shaders and their shared constants are in `rendererShaders.ts`, the platform crowds' sums in `platformCrowds.ts`), `gl.ts` (shader compile, uniform lookup, zoom interpolation, the GPU timer, canvas sizing, and the camera: `Camera` for the flat map or the globe, `PROJECT_GLSL` and `setCamera` for the shaders, `mercToCss` and `clipToCss` to CSS px, `behindHorizon`; T-033; shared by the renderer, `demandOverlay.ts`, `gradeMarks.ts`, `transferBubbles.ts`, `shadeLayer.ts`, `overlay.ts` and the 2D overlays), `network.ts` (the renderer's
   buffers, built in the clock worker from per-edge, line and station pieces kept between edits,
   T-496, and posted as changes to the last, `NetPatch` and `mergeNet`, T-1029; moved to a new draw anchor by `shiftNetCache`, T-1170), `lineBands.ts` (lines sharing track side by side: each edge's order of its lines, the ribbon at each place, and each line's sideways shift along its path as knots, smoothed along the line, T-1799, T-1848, the lines of one ribbon change easing at one place, T-2140; the Traffic view's shifts by riders, `trafficBands`; after an edit only the lines whose inputs it touched are worked out again (the edges they read and the network's pair rules they read, so a pair rule that changes redoes only the ribbons that used it), `BandMemo`, T-2238, which `?patch=check` compares with a whole pass), `corridors.ts` (every edge with lines sampled every 25 m, each sample's edges running beside it within 20 m, mirrored, kept between builds, T-1848, an edge's samples the same object while unchanged, T-2238), `strokePost.ts` (how the track and line strokes are posted: whole with room after the last segment, unchanged, or only the new segments written over the page's arrays, and the page's merge; T-1381), `geo.ts` (the draw anchor, T-307; `pxPerUnitAt` and `unitPerPxAt` for the zoom's scale), `anchorVersion.ts` (its version as a signal, T-317), `visibility.ts` (the lines and levels the player hid, as the renderer's shaders, the station boxes, the grade marks and the picks read them, T-3420),
   `live.ts` (the live map objects for UI code, set by main.ts; `hiddenOnGlobe` for DOM marks, T-033), `synth.ts` (stress network),
@@ -202,7 +203,7 @@ city's name in Japanese or Chinese from `place-names.json`, written by `tools/pl
 - Stations: `stationGeometry.ts` (platform shapes along the track for drawing, picking and the
   ghost, T-189, T-254; the waiting room annex, `stationAnnexes`, T-1416), `stationSide.ts` (the side a station on
   single track draws its one platform on, T-3540), `facilityPlace.ts`
-  (where each complex's one waiting room and car park go, in the clock worker, T-1528),
+  (where each complex's one waiting room and car park go, in the clock worker, T-1528; kept per complex between builds, T-3803; rooms, lots and buildings looked up through `shapeGrid.ts`, T-3659),
   `parkingLots.ts` (the car parks drawn as lots under the network, their hit test, T-1528), `stationNames.ts` (a station's name suggestions: cross street,
   neighbourhood, city or town, T-534), `stationLabels.ts` (names
   keep their elements across edits unless their text changes, T-496; the labels and the shadow
@@ -220,7 +221,7 @@ city's name in Japanese or Chinese from `place-names.json`, written by `tools/pl
   for long legs with fine ends, the line's rounding and speeds, `runSeconds`; pure, shared with the check),
   `ferryWater.ts` (`FerryWater`, the tool's client: `port`, `probe`, `line`), run in
   `workers/ferryWater.worker.ts` (fetches and keeps the tiles, each leg's search and rasters).
-- Ferry lines (T-2194): `ferryDraw.ts` (the ferry tool: ports placed or shared, the route from `FerryWater`,
+- Ferry lines (T-2194): `ferryDraw.ts` (the ferry tool: ports placed or shared, waypoints on shift click, T-3809, the route from `FerryWater`,
   the price tag, refusals, `ferryDraft`; `setPorts`, the panel's port list edits, T-2275); a ferry line's app row is a bus row with `ferry` set
   (`ClockBus.ferry`, the clock worker's `ferryRow`), so `busLayer.ts` draws it dashed and `BusInspector.tsx`
   is its panel (`FerryPorts`, its port list); boats are `BOAT_CAR` in `network.ts` and the train shader's hull; check `checks/t2194-ferry-tool.mjs`.
@@ -238,10 +239,10 @@ city's name in Japanese or Chinese from `place-names.json`, written by `tools/pl
   name in `stationLabels.ts`; check `checks/t2218-building-tool.mjs`.
 - Tools: `realSnap.ts` (the track tool's snap to the real network: ring, route ghost and tag, the
   second click's route, T-727d; only where a graph covers the click, `covers`, T-913), `streetSnap.ts` (tram track's snap to streets, T-2927: `BusRoads.tramLeg` and `RoadGraph.turnPath`, then `trace_kind` in the router worker), `pick.ts`, `cellIndex.ts` and `snapIndex.ts` (grids built in idle time, at once for 20,000 items or more (T-2404), that narrow a pick
-  and the build tools' snap to what is near the pointer, T-724, and carried over an edit, T-1030), `tools.ts` (drawing track, placing stations, the line tool; on touch the tap, preview and confirm and the control bar's place, T-1260), `touch.ts` (whether the last press was a finger, and what the touch control bar offers), `stationSnap.ts` (which overlapping track a station goes on, the nearest spot with room for the platform, T-671, T-1870), `edgeEdit.ts`
+  and the build tools' snap to what is near the pointer, T-724, and carried over an edit, T-1030), `tools.ts` (the `Tools` class: drawing track, snapping, the line tool and the events; split in T-2374, notes/T-2374-tools.md: `stationTool.ts` the station tool's name, trips near, ghost and click, `toolTouch.ts` the tap, preview and confirm and the control bar's place, T-1260, `toolDelete.ts`, `toolMarks.ts` the marks and tag, `toolParts.ts` the shared constants and types; each takes the `Tools` as its first argument), `touch.ts` (whether the last press was a finger, and what the touch control bar offers), `stationSnap.ts` (which overlapping track a station goes on, the nearest spot with room for the platform, T-671, T-1870), `edgeEdit.ts`
   (dragging blueprint track's PIs, T-064, T-092; a double click adding a point, T-2951), `nodeDrag.ts` (dragging blueprint nodes, T-093; a platform's end, T-1869; `endDrag`, a drag's cleanup), `dragHandles.ts` (where the platform-end handles are, for the markers and the drag, T-1869; `NODE_HIT_PX`, a node's reach for a press), `endMarkers.ts` (loose-end and draggable-point markers, T-416), `screenPlace.ts` (`placeAt`: every DOM mark placed through the overlay's projection, hidden where its point has no place on the screen, T-1777; `marksLayer`, a tool's layer of marks), `curveCircle.ts` (the circle of the segment being drawn, T-418),
   `blueprintBox.ts` (the Select tool's drag box, T-333, and dragging its pick, T-475; its state is `game/blueprintPick.ts`; the pieces a rebuild would refuse outlined in red, T-3059, and the track beyond the pick its stations ramp on, T-3241, from `game/rebuild.ts`; plain selecting's Shift+click on the same pick, `shiftClick`, T-3746),
-  `busStops.ts` (a by-hand bus line's stop editing, T-2891; it snaps to stations and, by `game/busLinks.ts`, to other bus lines' stops within demand's merge, T-2992), `stopMarkers.ts` (the toggle markers of stop editing, T-233; the gap to a station they cannot
+  `busStops.ts` (a by-hand bus line's stop editing, T-2891; it snaps to stations and, by `game/busLinks.ts`, to other bus lines' stops within demand's merge, T-2992; `busPlaces` there groups the stops into demand's places for the bus stop panel, `ui/inspector/BusStopInspector.tsx`, and the map's connectors, T-3890), `stopMarkers.ts` (the toggle markers of stop editing, T-233; the gap to a station they cannot
   reach, drawn by `gapFlash.ts`, T-1896), `reversalMarks.ts` (the icon over
   stations where a line reverses partway, T-797).
 - Trains and trips: `trainGuard.ts` (trains in view held behind the train ahead on their track, drawn late by a lag per trip, T-1965; zoomed in, waiting at flat crossings and crossing junction moves by their timetabled times there, T-1966, from `NetworkBuffers.conflicts` = `TrackApi.guard_conflicts`; at every zoom, opposite directions taking two-way single track in turn, T-3202, from `NetworkBuffers.singles` = `TrackApi.guard_singles`, with the trains at a station on single track on its two drawn tracks; its line paths are `NetworkBuffers.pathTable` and the like), `terminalBays.ts` (where a train stands at its line's ends: both platforms of a double-track dead end, a terminal's two sidings, a single-track station's two tracks; the pick made in the clock worker from the timetable, drawn by the train shader and held by the guard, T-2980; and `singleSplitEnds`, where two-way single track is drawn splitting into two through a station, T-3212, which `network.ts` draws the track, lines and trains from), `trainFollow.ts` (a selected train followed onto its next trip, T-245), `cameraFollow.ts` (the camera follows the selected train, from the overlay's `afterDraw`; `checks/t3361-follow.mjs`, about 2 minutes, T-3361),
@@ -285,14 +286,19 @@ rivers thinned to centre lines, their crossings with the hops' tracks),
 `borders.ts`' pill regions were deleted in T-2590), `regions.ts` (the network's regions, one sheet each, and their drawings put together and placed, T-3448; the clock worker builds a graph per region), `sheet.ts` (the rubber sheet, the diagram's default: a quadtree lattice
 stretched by multigrid so the network has room, `rubberSheet` and `sheetWarp`, T-2568; the cut T-2609 and the floor's fall from the networks T-2625), `sheetLines.ts` (the layout's
 octilinear stages run from the sheet, the map carried with the stations, and its sea and zone borders, `sheetLines` and
-`sheetMap`, T-2567; its carry's solve in WASM through `carryWasm.ts`, T-2589), `sheetThin.ts` (the sheet's map before its coasts are traced: thin water and land drawn again as
-bands, nibs smoothed, a city map's narrow rivers as bands, T-2580), `lsqr.ts`
+`sheetMap`, T-2567; `sheetLayout`, laid out again round stations a routed river finds on the wrong bank, T-3358; its carry's solve in WASM through `carryWasm.ts`, T-2589), `thin.ts` (buses and ferries fitted
+thin into a laid-out region through its carried map, T-3360; a ferry over the drawn water through `ferryWater.ts`, T-3824), `busGraph.ts` (buses and ferries with no rail near, a graph
+of their own, T-3360), `sheetThin.ts` (the sheet's map before its coasts are traced: thin water and land drawn again as
+bands, nibs smoothed, T-2580), `riverRoute.ts` (a city map's narrow rivers routed after the layout, one band a
+course, stations held on their banks, T-3358), `coastRound.ts` (the coast's small features taken out before its
+corners are rounded, and fillets where bands meet the sea or each other, T-3833), `lsqr.ts`
 (sparse least squares), `fmath.ts` (atan2 and powers from + - * / and sqrt, so every engine lays a graph out alike, T-2255), `draw.ts` (ribbons, rounded bends and pills, pieces going out of a node the same way drawn as one bundle (T-2405), made in the layout worker, painted
 on a 2D canvas, the focus faded and `pickAt`, T-2163), `names.ts` (station names placed per zoom level
 in the layout worker, painted, and `nameAt`, T-2162), `cityNames.ts` (a name per city block far out, centred on its own
 city's stations, grey under the lines, T-2438, T-2521, T-2581), `view.ts` (key M, the canvas, pan and zoom, clicks,
 hovers and the camera, the picture, the names picked and measured, the layout worker and its progress;
-`ui/DiagramButton.tsx` its button and `DiagramTopLeft`, the save button and loading bar, T-2163, T-2235;
+`ui/DiagramButton.tsx` its button and `DiagramTopLeft`, the save button and loading bar, T-2163, T-2235, the mode buttons
+T-3360;
 the station tag is `complexTip` in `map/networkTips.ts`).
 
 ### src/ui/: Preact components
@@ -306,7 +312,7 @@ checkboxes and the inline SVG icons); `ColourPicker.tsx` (the line colour picker
 dialog); `DemandSelector.tsx` (None/Homes/Destinations and the purpose filter, the track display and station ridership rows; Drives is a Settings check, T-1477); `Blueprint.tsx`
 (Build's quote, its cost breakdown by part and stretch, T-2269, and Construct, and the Select tool's selection bar on the map, T-353); `trackPrice.ts` (the track tool's price at a level and the level buttons' hovers, T-2271); `Debug.tsx` (the `?debug=1` readout); `Credits.tsx` (links to the game's about page on anita.garden and its sources section, which carries T-924's licence notices: the foot of Settings, and "About this game" on the start menu); `FeedbackPanel.tsx` (Settings' "Submit feedback" modal, sent through game/account.ts, T-1673); `MoneyText.tsx` (a money figure in the alert red while negative, and the hover of a line's money, T-722, T-1851); `PassingNote.tsx` (a one-line note on the map for a few seconds, under the edit note, T-2166); `zenmaru.css` (Zen Maru Gothic as woff2 slices by code point, T-1825); `inspector/` (one inspector
 per selection kind: `Inspector.tsx` (the switch on the selection), `CommutersInspector.tsx` (commuter bubbles picked on the map), `ClosestStations.tsx` (the 3 stations nearest on foot, shared by the station and bubble inspectors, T-312), `PurposeBreakdown.tsx` (one purpose's departures through the day, T-193), `PurposeSplit.tsx` (riders by trip purpose as a stacked bar under a line's riders and a station's boardings, T-165); `StationInspector.tsx` (its upgrade row `StationUpgrades.tsx`, T-1281), `TrainInspector.tsx`, `TrackInspector.tsx` and `JunctionInspector.tsx`; `LineInspector.tsx`, handing a bus or ferry line to `BusInspector.tsx` (T-1464), both built from `LineTitle.tsx` (the title, its name, symbol and colour editor, the group row) and `schedule.tsx` (the Schedule table and its hovers, the average speed, the past 24 hours with the Average load, and the vehicle words, `vehicleOf`, T-2373); `CityInspector.tsx` with `CityDetails.tsx`, the city view's own rows (T-1438), and `TripGraph.tsx`, its trips by length (T-2365; the bins and curves in game/tripLengths.ts, the zones' answers and the corridors' distances in game/zoneLengths.ts); `AllCitiesView.tsx`, the Cities tab's All cities row as a view, and `HomeButton.tsx`, the home icon of both (T-2395; the home a signal in game/home.ts, set through clockClient's `setHome`, kept in the save header's `home` by the clock worker and used by ui/locate.ts's open fit); the trip panels share `tripText.ts` and `RouteParts.tsx`;
-`ComplexMap.tsx` the complex map; `TrainStops.tsx` a train's next stops and who gets off, `MareyChart.tsx` the line's timetable chart from `TrackApi.line_trips` and the run profiles (T-2603), with `mareyShare.ts` the other lines over its track and the at-grade conflicts on its path (T-2660), T-868; `SchedulePanel.tsx` the schedule panel, its departures board from `TrackApi.station_departures` and the chart at its width, a group's chart too (T-3346); `LineProfile.tsx` the line's cross section at the foot of its view, from the clock worker's `workers/lineProfile.ts` (the line's points with their track height, stops, other lines' track crossing it) and `game/groundHeights.ts` (ground heights from the hillshade's Terrain Tiles, decoded per tile), T-2734; `OneRider.tsx` one sampled rider of a train (`game/riderSample.ts` draws it, `riderTrip` in `map/tripView.ts` reads its minutes), T-1436; `NameEdit.tsx` a station's or line's name edited in place, T-534; `LineGroup.tsx` the line panel's group row and Leave group, T-1791; `GroupInspector.tsx` the group view and its diagram, laid out by `game/groupLayout.ts`, T-1791); `LoadingScreen.tsx` (the clock hold at startup, the loading card,
+`ComplexMap.tsx` the complex map; `TrainStops.tsx` a train's next stops and who gets off, `MareyChart.tsx` the line's timetable chart from `TrackApi.line_trips` and the run profiles (T-2603), with `mareyShare.ts` the other lines over its track and the at-grade conflicts on its path (T-2660), T-868; `SchedulePanel.tsx` the schedule panel, its departures board from `TrackApi.station_departures` and the chart at its width, a group's chart too (T-3346); `LineProfile.tsx` the line's cross section at the foot of its view, from the clock worker's `workers/lineProfile.ts` (the line's points with their track height, stops, other lines' track crossing it) and `game/groundHeights.ts` (ground heights from the hillshade's Terrain Tiles, decoded per tile), T-2734; `OneRider.tsx` one sampled rider of a train (`game/riderSample.ts` draws it, `riderTrip` in `map/tripView.ts` reads its minutes), T-1436; `NameEdit.tsx` a station's or line's name edited in place, T-534; `LineGroup.tsx` the line panel's group row, T-1791; `GroupInspector.tsx` the group view and its diagram, laid out by `game/groupLayout.ts`, T-1791); `LoadingScreen.tsx` (the clock hold at startup, the loading card,
 the screen when demand cannot load, T-149, T-172, T-180); `StartMenu.tsx` (the start menu and the URL switches that skip it, T-677); `StartLogo.tsx` (the menu's logo: a NetworkRenderer of its own with a flat camera, `window.twLogo` its frame counts, T-1567) with `map/logoNetwork.ts` (the logo's letters as network buffers and timetables, no sim); `NewGame.tsx` (the new game sheet: mode, start city, current location, search, real network, running side; `START_CITIES`, `REAL_NETWORKS`, `zoneForLocation`, T-728, T-731, T-1132, T-3297); `SideSwitch.tsx` (T-3297: the Trains keep row, Settings' switch of a game's side with its question and the list of what the switch fixed and left, `flipSites` in `game/world.ts`; the start's side from `game/runningSide.ts`, the railway side by country and the real networks that keep left); `Spinner.tsx` (the small spinner, T-647, and the bunny's train, T-677); `Search.tsx` (T-148); `DemandStopped.tsx` (the alert when demand stops after startup, T-757); `keys.ts` (which keys a focused control keeps, T-183); `locate.ts` (the camera to a station, a line or track nodes (a breakdown row, T-2269): search picks, the tabs' double click, the inspectors' locate button, T-569; `viewStart`, the camera at a new game's start);
 `tip.ts` (the hover tag for every panel and control, from `data-tip`, never `title`, T-210);
 `blurHold.ts` (every hover kept up through a window blur until the pointer moves, T-483);
@@ -316,12 +322,12 @@ the screen when demand cannot load, T-149, T-172, T-180); `StartMenu.tsx` (the s
 
 `realRoute.worker.ts` (the real-network router: graphs joined at borders, A* with the turn limit
 and families, then the fit in steps on a track model of its own, dropped for a newer request, T-727d, T-754; the outlines of the regions with a graph sent to the page, T-913); `protocol.ts` (edit ops, `RouteAsk` for a route edit and its preview, clock messages, the network snapshot for demand), `clock.worker.ts` (owns
-the network: `TrackApi`, notes/T-025.md; money too; an edit's follow-up (state, trips, boarding hour, answer) waits behind the previews asked meanwhile, `later`, T-1407, an early track segment's until the pointer rests, `holdOn`, T-2404; `slotSummary`, a save's picture
-with a panel per city, T-894), `slots.ts` (the save slot of the game in hand, T-3734: `writeBlock`, whether and why the
+the network: `TrackApi`, notes/T-025.md; the message handler, setup, saves' glue and `slotSummary`, a save's picture with a panel per city, T-894. Split in T-2374 (notes/T-2374.md): `clockState.ts` (the shared state, read as imported bindings and written through `put` functions), `clockPanic.ts` (Rust panics, T-1007), `clockFares.ts`, `clockGround.ts` (water, terrain, streets and roads fetched on demand), `clockFollowUp.ts` (an edit's follow-up waits behind the previews asked meanwhile, `later`, T-1407, `holdOn`, T-2404), `clockMain.ts` (`buildState`, `sendState`), `clockMoney.ts`, `clockPost.ts` (the diagram's graph, posting only what changed), `clockDemand.ts` (boarding, the hour's trips, the demand snapshot), `clockEdits.ts` (`apply`)), `slots.ts` (the save slot of the game in hand, T-3734: `writeBlock`, whether and why the
 slot may not be written now; `publishSlots`, autosave, the save by hand, the saves panel's actions, the slot's lease
 against other tabs, the cloud queue; its state is the one object `saves`, which the clock worker also reads and
 writes, and it reaches the game through the `SlotHost` the worker binds; `letGoSlot` for a start or open that failed,
-whose record is game/openFailures.ts, T-3773), `stateRows.ts` (`StateRows`: the state's edge, node and line rows
+whose record is game/openFailures.ts, T-3773), `valuePatch.ts` (a value posted as its changes from the last one: the
+money record, T-3803), `stateRows.ts` (`StateRows`: the state's edge, node and line rows
 kept between edits and read from the track model again only where `take_changed_lines` and
 `take_name_changes` say they changed; station names kept by node, phase tables per line; T-1382, T-1540), `platformLines.ts` (each
 station's drawn platform line in world units, on its node row, for the complexes; T-1859), `saveFile.ts` (the save format
@@ -371,6 +377,11 @@ data/packs mid-batch.
 The page's link preview (`og:` and `twitter:` tags in `app/index.html`, absolute URLs on anita.garden/trainsworld/)
 names `app/public/preview.png`, 1200x630, which the build copies beside index.html and `deploy.py` publishes with the
 rest of dist (T-2543). Redo the picture when the look changes; X and Bluesky cache cards.
+The game installs as a phone app (T-3815): `app/public/manifest.webmanifest` (relative `start_url` and `scope`, standalone,
+the pink theme's background) and `icon-192.png`, `icon-512.png`, `icon-maskable-512.png` (the favicon glyph on that background),
+linked from `app/index.html` with the iOS tags; `deploy.py` copies them with the rest of dist. There is no service worker and no
+offline caching, on purpose: it can pin an old build after an update, and offline play is for the Steam release. Chrome
+offers Install without one (checked with `Page.getInstallabilityErrors`, Chrome 157).
 
 ## checks/: standing checks
 
@@ -487,7 +498,7 @@ Run with `..\venv\Scripts\python.exe` (the maps venv).
   `zone_terrain.Fine` reads a test run's tars before the intermediate's with `TW_FINE_OVER=<dir>`.
 - `world_terrain.py` (T-2901): the world's terrain classes, one gzip file per degree block with data
   (`build <fine> <out> [--jobs n]`, into `data/terrain-world-v2/` since T-3372; the old `data/terrain-world/` is v1, still on R2 for releases made before it) and `index.bin` (which blocks have a file), read by
-  the game (`game/terrainBlocks.ts`, the terrain section of `workers/clock.worker.ts`) and published by `tools/deploy.py --terrain-world`.
+  the game (`game/terrainBlocks.ts`, the terrain section of `workers/clockGround.ts`) and published by `tools/deploy.py --terrain-world`.
 - `zone_terrain.py` (T-1270, T-1854): the terrain classes from that intermediate (thresholds, filter and
   cap in its docstring) and the `.terrain` encoding, which `world_terrain.py` uses; there are no per-zone
   files since T-2901. `mix [dir]` the class shares over the blocks, `probe lon lat km`. Its `Dem` reads GEDTM30 at 240 m (`data/raw/gedtm30/`) for `market_drives.py slope`, whose
@@ -597,10 +608,13 @@ Run with `..\venv\Scripts\python.exe` (the maps venv).
   (T-1774), parallel chains grouped into corridors, cut at stations and where the
   lines change, as many double-track pairs a piece as its trains need and OSM's tracks allow and
   the lines on each, with a picture, (`realshared.py`) the track model's nodes, edges, platform
-  tracks and line paths from them, and (`reallevels.py`, T-1773) each node's level and each edge's
+  tracks and line paths from them (T-3790: no node over a game node's 8 ends, a bigger junction split into
+  several joined by links, a station side over 8 through fans, and a short dead end where a line turns back at
+  no stop; rules in its docstring), and (`reallevels.py`, T-1773) each node's level and each edge's
   stretches of level from OSM's layer, tunnel and bridge tags (rules in its docstring, notes/T-1773.md),
   which `realsave --shared` builds into the save, a ramp per change placed clear of platforms
-  (`REALGRAPH_DIR` reads a staged set of graphs) (`--slow` also
+  (routed on realgraph.py's lines graphs in `data/work/realgraph-lines/`, T-3790; `REALGRAPH_DIR` reads a staged
+  set) (`--slow` also
   prints where trains lose time: curves, the capacity pass's holds by node, resources over 90%, and
   writes `<city>_holds.json`). Each line has its real colour (T-1770,
   `realcolour.py`, called by `net`; `realnet.py colours <city>` adds it to an older network JSON, staged
@@ -613,7 +627,8 @@ Run with `..\venv\Scripts\python.exe` (the maps venv).
   Shinkansen run on high-speed track, and `n02_trim.json` holds the cuts and omissions game runs
   asked for (T-1625, notes/T-1625.md; `realsave` reads `trains` and `hsr` from the network JSON, in both its builds, and gives high-speed trains to every line with over half its length on high-speed track, the game's own rule for a new line, T-3272). `calib.py
   targets <city>` writes the city's targets (`data/work/calib/<city>/`), `calib.py run <city>
-  [--set k=v,..] [--params p.json] [--tag t]` runs the sim's `calib` bin (a weekday, commutes and
+  [--set k=v,..] [--params p.json] [--tag t] [--levels l.json]` (T-3888: each station's level, 0 at
+  grade, for the stairs) runs the sim's `calib` bin (a weekday, commutes and
   everyday, 3 crowding rounds, about 22 s for New York) and scores it (station entries, operator
   totals, rail share by home area); `calib.py score <run.json>` rescores. notes/T-509.md.
 - `realside.py <in.save> <out.save> left|right` (T-3297): a real network's game file set to a running side, the
@@ -624,19 +639,23 @@ Run with `..\venv\Scripts\python.exe` (the maps venv).
   reason (`dropped_routes`) and its own `lines` overrides, which the `osm` adapter reads after the
   source's (S-Bahn mapped as light rail, T-3265); `build [ids] [--jobs N]`
   runs net, geom, corridors, `realsave --shared --slow` and gamesave per city, builds a city again
-  without the routes whose lines did not run (`auto_<id>_skip.json`), and writes a report per city
+  without the lines that did not run (`auto_<id>_drop.json`) until every line runs (`BUILD_PASSES`), builds a city
+  with a keep list (`realauto_keep/<id>.json`, written by `keep <id> <save>`; Moscow's is v0.4.2's lines, T-3790)
+  from the lines it picks only, and writes a report per city
   (`auto_<id>.json`: stations, lines running, names in Latin letters, km off the graph, holds);
   `ship` ships the listed cities that passed and writes `app/src/game/realNetworks.json`. `realnet.py`
   makes each listed city a `CITIES` entry (`auto_city`). Rules in its docstring; notes/T-3225.md.
   Browser check: `checks/t3225-real-load.mjs` (every city from the new game sheet to playable).
-- `realgraph.py <cc ...> [--check] [--out DIR] [--nori DIR]` (T-727b; freight from the extract's ways and abandoned rail from the region's `_extra.pmtiles`, kinds 8 and 9, T-3495; run with the system Python, which has pmtiles and mapbox_vector_tile): the real network the layer draws as a routing
+- `realgraph.py <cc ...> [--check] [--out DIR] [--nori DIR] [--lines DIR] [--lines-only]` (T-727b; freight from the extract's ways and abandoned rail from the region's `_extra.pmtiles`, kinds 8 and 9, T-3495; run with the system Python, which has pmtiles and mapbox_vector_tile): the real network the layer draws as a routing
   graph per noritetsu region, plus short undrawn track that fills its gaps (T-816), from noritetsu's
   extract, `ways.json` and `track_extra.json` (the ways tiles flag `x`, T-3043; read only), into `data/packs/realgraph/<cc>.rgr` (gzip, layout in its
   docstring, which has each chain's OSM `layer` in its flags' top bits for the real networks' levels,
   T-1773; 0.01-7.5 MB, 1-32 s a region) and `index.json` (the regions built, which the track
   tool snaps inside, T-913; no regions given rewrites only it). Built for all 118 noritetsu regions
-  with drawn track (44.2 MB, about 5 min on 1 core; T-727e, T-3043), copied into the build. Rerun after
-  noritetsu rebuilds a region.
+  with drawn track (44.2 MB, about 5 min on 1 core; T-727e, T-3043), copied into the build. Each region also
+  gets its lines graph, `data/work/realgraph-lines/<cc>.rgr` (only track a line runs over plus gap fillers, cut only
+  where those meet; the real networks are routed on it, never deployed, T-3790; `--lines-only` writes just these,
+  in the venv). Rerun after noritetsu rebuilds a region.
 - Basemap glyph tiles (`app/public/fonts/`, checked in): `glyphs.py` rebuilds them, after a
   one-off `cargo install build_pbf_glyphs --locked` (on Windows set `CFLAGS` to a libz-sys zlib
   folder first, notes/T-056.md). Only needed to change the font, weights or fallback.

@@ -14,8 +14,9 @@ Per OD pair and period, rail, driving and walking the whole way (below) compete 
 there is no car ownership in demand (Anita, 2026-10-21, T-854), and "car" in every view stands for
 the car and every other way of getting about (bus, taxi, bike).
 
-- rail = walk to a station + wait (half the headway, capped) + ride + walks between platforms +
-  walk from station + fare / value of time (a change costs a fixed 2 perceived minutes, its wait
+- rail = walk to a station + the boarding cost (below) + wait (half the
+  headway, capped) + ride + walks between platforms + walk from station + fare / value of time (a
+  change costs a fixed 2 perceived minutes, its wait
   and the walk between the two platforms' centres: T-717; onto the line just left only where it
   passes the station again towards other stops, as at a lollipop's junction, T-1268, or after a
   walk to another of its stops, away from where the rider rode, as across the bend of a line
@@ -64,7 +65,7 @@ except on the regional market's longer trips, whose riders come in income groups
 mode's money alike (T-1431, docs/regional.md 5.1). The
 fare is the player's curve of trip length (T-883, T-1112, T-1143, track-and-service.md, fares;
 a new game's matches real fares, T-1521)
-times the trip's country's fare scale, charged once per trip including transfers on actual track
+times the trip's country's fare scale (with fares by city, its city's, T-3766), charged once per trip including transfers on actual track
 length. **A transfer fare** (T-1801, `Params::xfer_fare`, $0 in a new game) is paid on each
 boarding after a trip's first, a change within a station complex included and a circle line ridden
 round not one, in the curve's units times the trip's country's scale like the curve, at `fare_w`.
@@ -88,12 +89,31 @@ without multiplying fare (T-067).
 walking at `beta`, damped on the car's minutes (above), drivers parking free and those paying for a
 space choosing apart; rail and the car split the rest by the ratio curve (T-918). The walk's real minutes are its distance at 6 km/h along a path 1.3 times the straight
 line (13 minutes a straight km); every minute weighs 1.5 (`walk_trip_w`, one rate), so 500 m costs
-10 perceived minutes, 1 km 19.5, 2 km 39 and 3 km 58.5. Against the car a walk gets a
-bonus of **10 perceived minutes** (`walk_bonus_min`; the logit's `asc_walk` is that times `beta`, so
-1.0 at 0.10, and it follows `beta`): what a short drive costs beyond its road time, which the car
-side does not otherwise carry (getting to the car, the walk from the space). One constant for
-commutes and everyday trips alike, and for every country (T-636). Walks over 10 km straight
-line are not offered (`WALK_REACH_KM`, a computational bound).
+10 perceived minutes, 1 km 19.5, 2 km 39 and 3 km 58.5. **No head start** (Anita, 2026-11-20,
+T-3888; 10 perceived minutes before): walking, rail and the car meet on their minutes alone
+(`walk_bonus_min` 0, the logit's `asc_walk`). One rule for commutes and everyday trips alike, and
+for every country. Walks over 10 km straight line are not offered (`WALK_REACH_KM`, a
+computational bound).
+
+**People who won't walk far** (Anita, T-3888, option A of notes/T-3888.md): a tenth of every trip's
+people (`walk_tier` 0.1) never walk it the whole way once its walk costs more than 800 straight
+metres' (`walk_tier_m`, by the walk's cost, so a detour round water counts). They choose between
+the network and the car alone (the ratio curve), and the walking rule refuses none of their
+station pairs, so a trip it refuses whole still has their riders, on every pair
+(`Params::tier_choice`); walking with no rail is 0.9 of the logit's there (`walk_no_rail`). A
+commute zone pair between cells takes the tier by its one walk cost (`set_walk_fine`). The
+regional layer's outings across a zone line take it from their packs' walk shares, so only once
+those are rebuilt.
+
+**The boarding cost** (Anita, 2026-11-20, T-3888; every level 2026-11-20, T-3910): a trip pays 2
+perceived minutes at its first boarding (`train_in_min`) and 2 where its last ride leaves
+(`train_out_min`), on a train or a tram, whatever the station's level; never at a change (which keeps
+its fixed 2), never on a bus or ferry. `network::STAIRS_AT_GRADE = false` exempts platforms at
+grade again (the level plumbing stays). The minutes are each
+station pair's expected over the departures its strategy takes by frequency
+(`search::trip_ends`), added after the route search as the fare curve is, so the choice among a
+station's lines does not see them; they are not in the walking rule's real minutes. The trip
+explorer shows them as "boarding".
 
 Commutes walk between cells (T-587, `Gravity::set_walk_fine`): each zone's homes and its jobs are
 six cells (`walk_samples`), those where the zone's cumulative weight in pack order crosses 1/12,
@@ -126,7 +146,8 @@ serves**: those trips keep their place in every total, in no mode (`DemandApi::c
 riders the trains' room turns away, all stay home. Car ferries are no road (Anita, 2026-11-03): the
 player's ferry or train is an island's only way, and a rail bridge the player builds joins nothing.
 The everyday layer applies it per sample (a pair of subzones is on one pair of parts). The regional
-layer's commutes and outings between zones and the market do not yet (T-2256, T-2216).
+market applies it by 6 km zone (each zone on its main part's land, docs/regional.md 5.1, T-2216);
+the far-end selection does not yet (T-2256).
 
 #### Weights, ferry fans, driving and parking
 
@@ -135,23 +156,30 @@ exist: riding 1.0, the walk to and from stations 1.5 (below), walking between pl
 transfer 1.39, waiting for a train 1.0 (half the headway, plain minutes: Anita, T-585), congested
 driving 1.33 (2.66 on a ride to a station, below), plus parking (below).
 
-**Ferry fans** (Anita, 2026-11-03, T-2196; design notes/T-2177.md 3.6; `FAN_SHARE`, `FAN_RIDE_W`,
-`FanCosts` in `sim/src/demand/everyday.rs`). A tenth of every visits (social) and attractions trip,
-weekend and holiday days alike, finds ferries fun: each minute aboard a ferry counts 0.1 of a
-minute for them. Their walks, waits, changes, fares and crowding count as anyone's, and they choose
-as everyone does (rail against the car and walking above), so a fan still drives where the port is
-far or the boats rare. No other purpose has fans (Anita: "no for errands"), and no trips are added:
-fans only move the leisure trips there are. Their station-to-station cost is the lower of the
+**Ferry fans** (Anita, 2026-11-03, T-2196; 2026-11-20, T-3892; design notes/T-2177.md 3.6 and notes/T-3892.md 3;
+`FAN_SHARES` in `sim/src/demand/everyday.rs`; `FAN_RIDE_W`, `COMMUTE_FAN_SHARE`, `FanCosts`, `CommuteFans` in
+`sim/src/demand/kernel/fans.rs`). 15% of every everyday trip (errands, visits, school, university, attractions)
+and 7.5% of airport and medical trips and of commutes, weekend and holiday days alike, find ferries fun: each
+minute aboard a ferry counts 0.1 of a minute for them. Their walks, waits, changes, fares and
+crowding count as anyone's, and they choose as everyone does (rail against the car and walking above), so a fan
+still drives where the port is far or the boats rare. No trips are added: fans only move the trips there are.
+Their station-to-station cost is the lower of the
 ordinary one and, over every ride on one ferry line from port p to port q, the ordinary way to p, the
 ride at the fans' weight and the ordinary way on from q (a change at each port, none where the trip
 starts or ends there); one ferry ride a trip, the cheaper way taken whole. A pair whose station pairs
 have no such cheaper way chooses as before to the bit; one that has gets the fans' rail share beside
-everyone else's (0.9 and 0.1 of its trips). Their rides to and from the ports are assigned as any
-trip between those stations and the ferry ride on its line, the stations counting one entry and one
-exit a trip. The lies: the fans' walking rule (T-1059) is the ordinary station pair's; the fare
-curve's extra is each leg's, not the whole trip's; their changes at the ports are not counted as
-transfers (the complex map, the transfer fare) and the trip explorer shows an ordinary rider. Trips
-across a zone line (the regional market's everyday outings) have no fans.
+everyone else's (0.85 and 0.15 of its trips, 0.925 and 0.075 for airport, medical and commutes); the walk
+tier (T-3888) rides on everyone's costs. A commute's trip home takes the ferry back from the port it
+left (where the line runs only one way round, the ordinary way between the two ports); a commute whose way
+back would end a ride at a station no trip ends at (a port past every home's and job's walk) has no fans' way.
+Their rides to and
+from the ports are assigned as any trip between those stations and the ferry ride on its line, the stations
+counting one entry and one exit a trip. The lies: the fans' walking rule (T-1059) is the ordinary station
+pair's; on a commute where the rule refuses most of the fans' station pairs and not most of everyone's, the
+fans choose as everyone does (f32 would lose the rest); the fare curve's extra is each leg's, not the whole
+trip's; their changes at the ports are not counted as transfers (the complex map, the transfer fare) and the
+trip explorer shows an ordinary rider. Trips across a zone line (the regional market's commutes and
+outings) have no fans.
 
 **Driving** (T-090, T-275; `place_min_per_km`, `drive_min_f`, `drive_factor` in
 `sim/src/demand/kernel.rs`). The road is the straight line times the two zones' routed factor

@@ -443,12 +443,20 @@ NATIONAL = {
 }
 
 
+# T-3762: places the World Bank does not list take a stand-in's employment and age shares, vulnerable employment and
+# GDP (nocar): Guadeloupe, Martinique and Saint-Barthelemy France's; French Guiana its neighbour Suriname's (closer in
+# age and employment than France's: a third of its people are under 15); the Caribbean Netherlands Curacao's; Anguilla
+# and Montserrat Antigua's. No tertiary figure is borrowed (tertiary_share: None)
+WB_STANDIN = {"GP": "FR", "MQ": "FR", "BL": "FR", "GF": "SR", "BQ": "CW", "AI": "AG", "MS": "AG"}
+
+
 def worldbank(iso2):
     """(jobs per resident, share aged 0-14) from the World Bank's ILO employment-to-population
     ratio (15+) and population ages 0-14, the latest year with both."""
     if iso2 in NATIONAL:
         emp, kids, year, _ = NATIONAL[iso2]
         return emp * (1 - kids), kids, year
+    iso2 = WB_STANDIN.get(iso2, iso2)
     path = netget.cached_json(WORLDBANK.format(iso2=iso2), raw(f"worldbank_{iso2}.json"), timeout=60)
     with open(path) as f:
         rows = json.load(f)[1]
@@ -515,6 +523,12 @@ NATIONAL_TERTIARY = {
     "DM": (1_500 / 66_510, 2023, "Dominica State College, about 1,500 students (the college's own page, 2023), over the "
            "World Bank's 2023 population, 66,510; excludes the UWI Open Campus and offshore medical schools (T-3755)",
            "https://dsc.edu.dm/about/"),
+    # the World Bank has no tertiary enrolment for Iraq (T-3763)
+    "IQ": (1_333_610 / (46_118_793 - 2_517_534 - 2_401_724 - 1_599_871), 2024, "COSIT Annual Statistical Abstract 2024, "
+           "table 29/9: 1,333,610 students in universities, the Technical Education Commission and private colleges in "
+           "2023/24, the federal ministry's (the Kurdistan Region's universities are not in the table), over the 2024 "
+           "census outside Erbil, Sulaymaniyah and Duhok, 39,599,664; the Kurdistan Region taken at the same rate (T-3763)",
+           "https://cosit.gov.iq/documents/AAS2024/09.pdf"),
 }
 
 
@@ -531,6 +545,8 @@ def tertiary_share(iso2):
     both, or NATIONAL_TERTIARY's; (share, year), or (None, None) where neither has a figure (T-288)."""
     if iso2 in NATIONAL_TERTIARY:
         return NATIONAL_TERTIARY[iso2][0], NATIONAL_TERTIARY[iso2][1]
+    if iso2 in WB_STANDIN:
+        return None, None
     by = {}
     for ind in ("SE.TER.ENRL", "SP.POP.TOTL"):
         path = netget.cached_json(WB_TERTIARY.format(iso2=iso2, ind=ind), raw(f"worldbank_{iso2}_{ind}.json"), timeout=60)

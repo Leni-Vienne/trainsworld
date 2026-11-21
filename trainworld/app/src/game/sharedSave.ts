@@ -47,16 +47,16 @@ const opt = (f: (v: unknown) => boolean) => (v: unknown) => v === undefined || f
 const FIELDS: Record<keyof SaveHeader, (v: unknown) => boolean> = {
   game: (v) => v === "anitabuilder", format: (v) => num(v) && Number.isInteger(v), city: str, region: opt(str), cities: opt(arr(str)),
   clock: (v) => num(v) && (v as number) >= 0, cash: num, loan: opt(num), loanPay: opt(num), loanDays: opt(num),
-  fleet: opt(num), fleetFast: opt(num), fleetBus: opt(num), fleetFerry: opt(num), fleetTram: opt(num),
+  fleet: opt(num), fleetFast: opt(num), fleetBus: opt(num), fleetFerry: opt(num), fleetFerrySmall: opt(num), fleetFerryLarge: opt(num), fleetTram: opt(num),
   fares: (v) => plain(v) && num(v.base) && num(v.perKm) && opt(arr((p) => Array.isArray(p) && p.length === 2 && p.every(num)))(v.nodes)
-    && opt(rec(num))(v.scales) && opt(rec(num))(v.lines) && opt(str)(v.baseline) && opt(str)(v.ref) && opt((b) => b === "usd")(v.basis)
-    && ["income", "hsr", "ferry", "bus", "transfer"].every((k) => opt(num)(v[k])),
+    && opt(rec(num))(v.scales) && opt(rec(num))(v.cityScales) && opt((b) => typeof b === "boolean")(v.byCity) && opt(rec(num))(v.lines) && opt(str)(v.baseline) && opt(str)(v.ref) && opt((b) => b === "usd")(v.basis)
+    && ["income", "hsr", "ferry", "ferrySmall", "ferryLarge", "bus", "transfer"].every((k) => opt(num)(v[k])),
   ledger: entries, hours: opt(entries),
   regions: opt(rec((r) => plain(r) && opt(entries)(r.ledger) && opt(entries)(r.hours))),
   lineDays: opt(rec(arr(num))),
   stars: opt(rec(num)), goals: opt(rec(rec(num))),
   notes: opt(rec((n) => Array.isArray(n) && n.length === 2 && num(n[0]) && str(n[1]))),
-  shapes: opt(rec(isLineShape)), hidden: opt(arr(str)),
+  shapes: opt(rec(isLineShape)), hidden: opt(arr(str)), schematic: opt(arr(str)),
   mode: opt((m) => m === "normal" || m === "sandbox"), start: opt(str), dayShift: opt((v) => typeof v === "number" && Number.isFinite(v)), opened: opt(arr(str)),
   demandFine: opt(arr(str)), demandBuilt: opt(arr(arr(str))), newCars: opt(num), newWeekendShare: opt(num), newHeadway: opt((v) => plain(v) && Object.keys(v).every((k) => (NEW_HEADWAY_KINDS as readonly string[]).includes(k)) && Object.values(v).every((h) => Array.isArray(h) && (h.length === 3 || h.length === 5) && h.every(num))), level: opt(num),
   guide: opt(plain), achievements: opt(rec((a) => plain(a) && num(a.at) && opt(str)(a.of) && opt(num)(a.v) && opt(arr(str))(a.in))),

@@ -292,7 +292,7 @@ fn main() {
                 pis = seq.into_iter().map(|(_, p)| p).collect();
             }
             let e = net.alloc_edge();
-            if net.set_edge(e, Some(EdgeData { a, b, tracks: 2, pis, built: true, off: false, thru: vec![], crossover: false, kind: TrackKind::from_hsr(edge_hsr), sep: true, day: 0, oneway: 0, join: [0; 2], limit: 0 })).is_err() {
+            if net.set_edge(e, Some(EdgeData { a, b, tracks: 2, pis, built: true, off: false, thru: vec![], crossover: false, kind: TrackKind::from_hsr(edge_hsr), sep: true, day: 0, oneway: 0, join: [0; 2], limit: 0, ramp: 0 })).is_err() {
                 refused += 1;
             }
             edge_ids.push(e);
@@ -317,7 +317,7 @@ fn main() {
             let name = format!("{} {}", l["feed"].as_str().unwrap(), l["name"].as_str().unwrap());
             let name = names::tidy_line(&name, "").unwrap_or(name);
             let colour = l["colour"].as_str().and_then(|s| u32::from_str_radix(s.trim_start_matches('#'), 16).ok()).unwrap_or(PALETTE[li % PALETTE.len()]);
-            let r = net.set_line(id, Some(LineData { rows: 0, x: Default::default(), symbol: String::new(), trains, auto: None, name, colour, stops, path, tph: [tph[0], tph[1], tph[2]], dwell_s: 30.0, turnaround_s: 180.0, cars, fast: false, bus: None, ferry: None, group: 0, group_name: String::new(), group_look: Default::default(), day: 0, hand: false, one_way: false, limit: 0, twin: Default::default(), weekend: Default::default(), ones: vec![], fare_dist: false }));
+            let r = net.set_line(id, Some(LineData { rows: 0, x: Default::default(), symbol: String::new(), trains, auto: None, name, colour, stops, path, tph: [tph[0], tph[1], tph[2]], dwell_s: 30.0, turnaround_s: 180.0, cars, fast: false, bus: None, ferry: None, group: 0, group_name: String::new(), group_look: Default::default(), outer: vec![], day: 0, hand: false, one_way: false, limit: 0, twin: Default::default(), weekend: Default::default(), ones: vec![], fare_dist: false }));
             if r.is_ok() {
                 n_lines_ok += 1;
             }
@@ -423,7 +423,7 @@ fn main() {
             }
             pis.push(Pi::new(lead_b.0, lead_b.1, 0.0, level).quantised());
             let e = net.alloc_edge();
-            net.set_edge(e, Some(EdgeData { a, b, tracks: 2, pis, built: true, off: false, thru: vec![], crossover: false, kind: trainworld_sim::track::params::TrackKind::from_hsr(hsr), sep: true, day: 0, oneway: 0, join: [0; 2], limit: 0 })).unwrap();
+            net.set_edge(e, Some(EdgeData { a, b, tracks: 2, pis, built: true, off: false, thru: vec![], crossover: false, kind: trainworld_sim::track::params::TrackKind::from_hsr(hsr), sep: true, day: 0, oneway: 0, join: [0; 2], limit: 0, ramp: 0 })).unwrap();
             path.push(e << 1);
         }
         let tph: Vec<f32> = l["tph"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap() as f32).collect();
@@ -432,7 +432,7 @@ fn main() {
         let name = names::tidy_line(&name, "").unwrap_or(name);
         // the line's real colour ("#rrggbb", `pipeline/realcolour.py`), else the palette
         let colour = l["colour"].as_str().and_then(|s| u32::from_str_radix(s.trim_start_matches('#'), 16).ok()).unwrap_or(PALETTE[li % PALETTE.len()]);
-        let r = net.set_line(id, Some(LineData { rows: 0, x: Default::default(), symbol: String::new(), trains, auto: None, name, colour, stops: nodes.clone(), path, tph: [tph[0], tph[1], tph[2]], dwell_s: 30.0, turnaround_s: 180.0, cars, fast: false, bus: None, ferry: None, group: 0, group_name: String::new(), group_look: Default::default(), day: 0, hand: false, one_way: false, limit: 0, twin: Default::default(), weekend: Default::default(), ones: vec![], fare_dist: false }));
+        let r = net.set_line(id, Some(LineData { rows: 0, x: Default::default(), symbol: String::new(), trains, auto: None, name, colour, stops: nodes.clone(), path, tph: [tph[0], tph[1], tph[2]], dwell_s: 30.0, turnaround_s: 180.0, cars, fast: false, bus: None, ferry: None, group: 0, group_name: String::new(), group_look: Default::default(), outer: vec![], day: 0, hand: false, one_way: false, limit: 0, twin: Default::default(), weekend: Default::default(), ones: vec![], fare_dist: false }));
         if r.is_ok() {
             n_lines_ok += 1;
         }

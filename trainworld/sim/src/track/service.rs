@@ -111,6 +111,8 @@ pub struct LineSvc {
     pub bus: Option<super::bus::Plan>,
     /// A ferry line (T-2193): run like a bus line (`bus` holds its ports as stops), every stop a port.
     pub ferry: bool,
+    /// T-3892: a ferry line's boat (Medium for any other line).
+    pub boat: super::ferry::Boat,
     /// T-3346 stage 2: the pattern the runs' variants were worked out for (`timing::retime`, as
     /// `Lattice::timing_key`); a trip takes one only while the line still runs it.
     pub timed: Option<Lattice>,
@@ -130,7 +132,7 @@ impl LineSvc {
     }
     /// Riders a train, bus or boat takes at crush.
     pub fn crush(&self) -> f64 {
-        if self.ferry { BOAT_CRUSH } else if self.is_bus() { BUS_CRUSH } else { super::boarding::CRUSH_PER_CAR * self.cars.max(1) as f64 }
+        if self.ferry { super::boarding::CRUSH_PER_CAR * self.boat.cars() as f64 } else if self.is_bus() { BUS_CRUSH } else { super::boarding::CRUSH_PER_CAR * self.cars.max(1) as f64 }
     }
     /// Riders a train, bus or boat takes at its rated load (100%, T-2186): two thirds of its crush
     /// for all three (T-2919).
@@ -720,20 +722,21 @@ fn build_run(net: &Network, l: u32, on: &Served, rev: bool, train_len: f64, dwel
         let e = path_edge(p);
         let len = net.edge_len[e as usize];
         run.seg_off.push(s);
-        let pcs = net.edge_pieces(e);
-        // T-817: the lowest of the curve's speed, the track's cap and the trains' top speed
+        // T-817: the lowest of the curve's speed, the track's cap and the trains' top speed; T-3027:
+        // and a ramp's
         let cap = net.v_cap(e).min(top);
+        let lims = net.edge_limits(e, cap);
         let mut add = |a: f64, v: f64| match raw.last() {
             Some(l) if l[1] == v => {}
             _ => raw.push([a, v]),
         };
         if path_dir(p) == 0 {
-            for pc in pcs {
-                add(s + pc.s0, pc.v_curve().min(cap));
+            for l in &lims {
+                add(s + l.s0, l.v);
             }
         } else {
-            for pc in pcs.iter().rev() {
-                add(s + len - (pc.s0 + pc.len), pc.v_curve().min(cap));
+            for l in lims.iter().rev() {
+                add(s + len - l.s1, l.v);
             }
         }
         s += len;
@@ -907,7 +910,7 @@ fn build_on(net: &Network, l: u32, stops: &[u32], path: &[u32], running: bool) -
     ls.stops = stops.to_vec();
     if ls.stops.len() < 2 { return ls; }
     ls.kind = net.loop_kind(stops, path);
-    ls.one_way = ls.is_loop() && net.line_one_way[l as usize];
+    ls.one_way = net.runs_once(l, stops, path);
     // T-3348: the platforms each run stops at
     let ways = net.way_stops(stops, path, net.line_ones(l)).unwrap_or_default();
     let min_plat = stops.iter().chain(&ways.0).chain(&ways.1).map(|&s| net.node_platform[s as usize]).min().unwrap_or(0) as f64;
@@ -946,7 +949,7 @@ fn build_bus(net: &Network, l: u32, r: &super::bus::BusRoute) -> LineSvc {
     let fwd_s: Vec<f64> = plan.stops.iter().map(|s| s.s).collect();
     let fwd_dw: Vec<f64> = plan.stops.iter().map(|s| if s.station.is_some() { dwell } else { 0.0 }).collect();
     let len = plan.len;
-    let pace = super::bus::Pace::along(net, &r.points, &plan.cum, &r.kinds, len);
+    let pace = super::bus::Pace::along(net, &r.points, &plan.cum, &r.kinds, len).brt(r.brt);
     let rev_s: Vec<f64> = fwd_s.iter().rev().map(|s| len - s).collect();
     let rev_dw: Vec<f64> = fwd_dw.iter().rev().copied().collect();
     let rev_street: Vec<f64> = plan.street.iter().rev().map(|s| len - s).collect();
@@ -1022,12 +1025,13 @@ fn build_ferry(net: &Network, l: u32, r: &super::ferry::FerryRoute) -> LineSvc {
     }
     ls.runs = [make(fwd_s, &fwd), make(rev_s, &rev)];
     ls.cars = 1;
-    ls.train_len = ferry::BOAT_LEN_M;
+    ls.train_len = r.boat.len_m();
     ls.ok = true;
     ls.running = net.line_constructed(l);
     ls.shift = net.line_shift(l);
     ls.bus = Some(plan);
     ls.ferry = true;
+    ls.boat = r.boat;
     ls
 }
 
@@ -1283,8 +1287,12 @@ impl Service {
     /// `spare` at `t` trains an hour for a place keeping headway `auto` (T-3542: a row's own rate in
     /// a slot its hours share with another).
     pub fn spare_with(&self, net: &Network, l: usize, lev: usize, t: f64, auto: Option<u32>) -> f64 {
+        self.spare_paced(net, l, lev, t, auto, net.line_pace_of(l as u32)[lev])
+    }
+    /// `spare_with` for a line paced at `pace` (T-3735: the weekends' pacing).
+    fn spare_paced(&self, net: &Network, l: usize, lev: usize, t: f64, auto: Option<u32>, pace: f32) -> f64 {
         let Some(ls) = self.lines.get(l) else { return 0.0 };
-        let paced = auto.is_some_and(|a| a > 0) || net.line_pace_of(l as u32)[lev] > 0.0;
+        let paced = auto.is_some_and(|a| a > 0) || pace > 0.0;
         if t <= 0.0 || ls.is_loop() || !paced {
             return 0.0;
         }
@@ -1329,7 +1337,7 @@ impl Service {
         let tph = net.line_tph[l];
         // The reverse departure follows the forward trip's turnaround, so an odd whole-line fleet
         // stays evenly spaced around the complete circuit.
-        let off_at = |lev: usize, t: f32, spare: &dyn Fn(usize, f64) -> f64| {
+        let off_at = |lev: usize, t: f32, split: &[f32; SLOTS], spare: &dyn Fn(usize, f64) -> f64| {
             let t = t as f64;
             if ls.one_way {
                 return f64::INFINITY;
@@ -1340,31 +1348,46 @@ impl Service {
             let (h, there) = (3600.0 / t, ls.trip_len(net, l as u32, 0, lev));
             // T-2607, T-2972: a headway line's trains wait out the time its round trip leaves them,
             // the share the spacing chose at its last stop, the rest at its first
-            (there + net.line_split_of(l as u32)[lev] as f64 * spare(lev, t)) % h
+            (there + split[lev] as f64 * spare(lev, t)) % h
         };
-        let off_of = |lev: usize, t: f32| off_at(lev, t, &|lev, _| self.spare(net, l, lev));
+        let split = net.line_split_of(l as u32);
+        let off_of = |lev: usize, t: f32| off_at(lev, t, &split, &|lev, _| self.spare(net, l, lev));
         // (a slot no period uses keeps 0, as one read back from a save's eras)
         let off = std::array::from_fn(|lev| if net.slot_worked(lev) { off_of(lev, tph[lev]) } else { 0.0 });
         // a loop's middle is half a lap from its first stop (T-798): the same figure
         let lead = (0.25 * (ls.runs[0].prof[MEDIUM].duration + ls.runs[1].prof[MEDIUM].duration)).clamp(0.0, net.mix(l).map_or(LEAD_MAX_S, |m| m.lead_max_s.min(LEAD_MAX_S)));
         // T-1925: under a headway, whatever the headway has become since it was placed
+        let phase_in = |p: &[f32; SLOTS], lev: usize, t: f32| if t > 0.0 { (p[lev] as f64).rem_euclid(3600.0 / t as f64) } else { 0.0 };
         let p = net.line_phase_of(l as u32);
-        let phase_of = |lev: usize, t: f32| if t > 0.0 { (p[lev] as f64).rem_euclid(3600.0 / t as f64) } else { 0.0 };
-        let phase = std::array::from_fn(|lev| phase_of(lev, tph[lev]));
+        let phase = std::array::from_fn(|lev| phase_in(&p, lev, tph[lev]));
+        // weekends at their own settled rates, which a line running its weekday counts then has too
+        // where others' counts change what the shared track lets it run
+        let rest_tph: [f32; SLOTS] = std::array::from_fn(|lev| if net.rest_solved { net.line_tph_on(l, WEEKEND, lev) } else { tph[lev] });
+        // T-3735: a line running other rates on weekends lays its weekend departures out on its own
+        // headways, pacing, spare time split and phases (`TrackWorld::place_weekend`), over the run
+        // times its weekend trains are drawn on (the weekdays'); any other its weekday pattern
+        let own = rest_tph != tph;
+        let (split_r, p_r, auto_r, pace_r) = if own {
+            (net.line_split_rest_of(l as u32), net.line_phase_rest_of(l as u32), net.weekend_auto(l), net.line_pace_rest_of(l as u32))
+        } else {
+            (split, p, net.auto_of(l), net.line_pace_of(l as u32))
+        };
+        let spare_r = |lev: usize, t: f64| self.spare_paced(net, l, lev, t, auto_r.map(|a| a[net.place(l, lev)]), pace_r[lev]);
         // T-3542: pieces of a slot the line's hours share between rows run each row's own rate
         let hours_of = |rest: &[f32; SLOTS]| -> Hours {
             let Some(m) = net.mix(l) else { return Hours::NONE };
             let (auto, ps) = (net.auto_of(l), net.period_slot());
             let mut h = Hours { n: m.n_pieces as u8, pieces: m.pieces, ..Hours::NONE };
-            for (i, p) in m.pieces[..m.n_pieces].iter().enumerate() {
-                let s = ps[p.q as usize];
+            for (i, pc) in m.pieces[..m.n_pieces].iter().enumerate() {
+                let s = ps[pc.q as usize];
                 if !m.mixed[s] { continue; }
                 h.own_on[i] = true;
-                let a = auto.map(|a| a[p.k as usize]);
-                for (row, t) in [(WEEKDAYS, &tph), (WEEKEND, rest)] {
-                    let tk = net.place_tph(l, s, p.k as usize, t[s], ls.round_trip[s]);
-                    h.own[i][row] = (tk, off_at(s, tk, &|lev, t| self.spare_with(net, l, lev, t, a)), phase_of(s, tk));
-                }
+                let k = pc.k as usize;
+                let (a, ar) = (auto.map(|a| a[k]), auto_r.map(|a| a[k]));
+                let tk = net.place_tph(l, s, k, tph[s], ls.round_trip[s]);
+                h.own[i][WEEKDAYS] = (tk, off_at(s, tk, &split, &|lev, t| self.spare_with(net, l, lev, t, a)), phase_in(&p, s, tk));
+                let tk = net.place_tph(l, s, k, rest[s], ls.round_trip[s]);
+                h.own[i][WEEKEND] = (tk, off_at(s, tk, &split_r, &|lev, t| self.spare_paced(net, l, lev, t, ar, pace_r[lev])), phase_in(&p_r, s, tk));
             }
             h
         };
@@ -1373,22 +1396,20 @@ impl Service {
         if !net.rest_solved {
             return Some(self.joined(net, l, week));
         }
-        // weekends at their own settled rates, which a line running its weekday counts then has too
-        // where others' counts change what the shared track lets it run
-        let rest_tph: [f32; SLOTS] = std::array::from_fn(|lev| net.line_tph_on(l, WEEKEND, lev));
-        let rest_off = std::array::from_fn(|lev| if net.slot_worked(lev) { off_of(lev, rest_tph[lev]) } else { 0.0 });
-        // T-3333: a twin's phase is pinned half its parent's weekday headway on (`pin_twin_phases`),
-        // which another headway turns into any other share: on weekends it is half their own
+        let rest_off = std::array::from_fn(|lev| if net.slot_worked(lev) { off_at(lev, rest_tph[lev], &split_r, &spare_r) } else { 0.0 });
+        // T-3333: a twin's phase is pinned half its parent's headway on (`pin_twin_phases`), which
+        // another headway turns into any other share: on weekends it is half their own
         let twin_of = match net.line_twin_of(l as u32) { crate::track::twin::Twin::Of(p) => Some(p as usize), _ => None };
         let rest_phase: [f64; SLOTS] = std::array::from_fn(|lev| {
             let t = rest_tph[lev];
             match twin_of {
-                Some(p) if t > 0.0 => {
-                    let pt = net.line_tph_on(p, WEEKEND, lev);
-                    let pp = net.line_phase_of(p as u32)[lev] as f64 + if pt > 0.0 { 1800.0 / pt as f64 } else { 0.0 };
+                Some(q) if t > 0.0 => {
+                    let pt = net.line_tph_on(q, WEEKEND, lev);
+                    let qp = if own { net.line_phase_rest_of(q as u32) } else { net.line_phase_of(q as u32) };
+                    let pp = qp[lev] as f64 + if pt > 0.0 { 1800.0 / pt as f64 } else { 0.0 };
                     pp.rem_euclid(3600.0 / t as f64)
                 }
-                _ => phase_of(lev, t),
+                _ => phase_in(&p_r, lev, t),
             }
         });
         // rates equal to the weekdays' run the weekdays' pattern, so they keep `rest_on` off and the

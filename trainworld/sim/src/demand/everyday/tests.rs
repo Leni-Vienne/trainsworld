@@ -235,7 +235,8 @@ fn short_everyday_trips_walk_what_rail_leaves() {
     for c in 0..2 {
         let total = modes[c]+modes[3+c]+modes[6+c];
         let pw = a.no_rail(0, c, 2, 400.0-city.x[c]);
-        assert!(pw>0.9, "{pw}");
+        // (most of a 300-400 m trip walks, with no head start too: T-3888)
+        assert!(pw>0.8, "{pw}");
         assert!(modes[c]>0.1*total, "rail takes some of them");
         assert!((modes[3+c]-(total-modes[c])*pw).abs()<1e-4*total, "cell {c}: walk {} rail {} total {total} pw {pw}", modes[3+c], modes[c]);
         assert!(modes[6+c]>=0.0);
@@ -907,10 +908,14 @@ fn bits(v: &[f32]) -> Vec<u32> {
     v.iter().map(|x| x.to_bits()).collect()
 }
 
-/// T-2196: on a line that is a ferry its fans ride it more: visits up, errands as before to the
-/// bit; a network with no ferry (no flags, or all 0) as before to the bit, free flow and crowded.
+/// T-2196, T-3892: on a line that is a ferry its fans ride it more, in every purpose (errands and
+/// visits up); a network with no ferry (no flags, or all 0) as before to the bit, free flow and crowded.
 #[test]
-fn ferry_fans_ride_visits_only() {
+fn ferry_fans_ride_every_purpose() {
+    // 15% of each purpose, half that for airport and medical trips
+    for (k, &s) in FAN_SHARES.iter().enumerate() {
+        assert_eq!(s, if k == 4 || k == 5 { 0.075 } else { 0.15 }, "{}", KINDS[k]);
+    }
     CHECK_LANES.with(|c| c.set(true));
     let (h, b) = fixture_of(4000.0, 1000.0);
     let solve = |ferry: &[u8], crowd: bool| {
@@ -936,10 +941,11 @@ fn ferry_fans_ride_visits_only() {
             let (x, y) = (plain.summary(q), zero.summary(q));
             assert_eq!((&x[..4], &x[5..]), (&y[..4], &y[5..]));
             let (a, f) = (plain.part_loads(q), fans.part_loads(q));
-            if !crowd {
-                assert_eq!(bits(&a[..3 * nr]), bits(&f[..3 * nr]), "period {q}: errands");
-            }
+            let errands = |v: &[f32]| v[..nr].iter().sum::<f32>();
             let visits = |v: &[f32]| v[3 * nr..4 * nr].iter().sum::<f32>();
+            if !crowd {
+                assert!(errands(&f) > errands(&a), "period {q}: errands {} against {}", errands(&f), errands(&a));
+            }
             assert!(visits(&f) > visits(&a), "period {q}: visits {} against {}", visits(&f), visits(&a));
             assert!(fans.summary(q)[2] > plain.summary(q)[2]);
         }
@@ -954,6 +960,8 @@ fn ferry_fans_change_to_and_from_the_ferry() {
     let (h, b) = fixture_of(8000.0, 1000.0);
     let solve = |ferry: &[u8]| {
         let mut a = EverydayApi::new(&h, &b).unwrap();
+        // (a ferry pays no train's way in and out, as the app says before the network, T-3888)
+        a.set_stairs(&[0, 1, 0], &[]);
         // a train to a port 1.5 km out, a ferry 5 km on (20 minutes), a train on from its other port
         let line = |t: f32| [t, 0.0, t, 0.0, t, 0.0, 0.0, t, 0.0, t, 0.0, t];
         let times: Vec<f32> = [line(120.0), line(1200.0), line(120.0)].concat();
@@ -970,10 +978,11 @@ fn ferry_fans_change_to_and_from_the_ferry() {
     let (mut rode, mut legs) = (false, false);
     for q in 0..5 {
         let (a, f) = (plain.part_loads(q), fans.part_loads(q));
-        assert_eq!(bits(&a[..3 * nr]), bits(&f[..3 * nr]), "period {q}: errands");
-        // the ferry's route nodes are 4..8
+        // the ferry's route nodes are 4..8; errands have fans too (T-3892)
+        assert!(f[4] + f[6] >= a[4] + a[6], "period {q}: errands on the ferry");
         let ferry = |v: &[f32]| v[3 * nr + 4] + v[3 * nr + 6];
-        rode |= ferry(&f) > ferry(&a) * 1.05;
+        // (4.6% here: the walk tier, a tenth, rides on ordinary costs, T-3888)
+        rode |= ferry(&f) > ferry(&a) * 1.04;
         legs |= f[3 * nr] > a[3 * nr] && f[3 * nr + 8] > a[3 * nr + 8];
         for a in [&plain, &fans] {
             let entries: f32 = a.entries(q).iter().sum();

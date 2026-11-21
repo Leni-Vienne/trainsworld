@@ -178,6 +178,59 @@ CONFIGS = {
         "national_total": (5_522_294, 0.0001),  # West Bank 3,395,260 (mid-2025) and the Gaza Strip 2,127,034 (end-2025)
         "mode": "factor",
     },
+    # T-1738: GHS-POP holds 0.46-0.60 of Vientiane Capital's districts (Xaythany 120,912 against 202,171 in 2015)
+    "LA": {
+        "source": "Lao Statistics Bureau 2024 projections by district (2015 census base), COD-PS LAO on HDX, on COD-AB LAO "
+                  "districts (HDX, CC BY-IGO)",
+        "polygons": {"file": "LA/lao_admin_boundaries.shp.zip",
+                     "url": "https://data.humdata.org/dataset/9eb6aff1-9e3f-43d3-99a6-f415fe4b4dff/resource/"
+                            "ba8747ac-d97a-43fc-874a-2c07a88316c2/download/lao_admin_boundaries.shp.zip",
+                     "layer": "lao_admin2", "code": "adm2_pcode", "name": "adm2_name"},
+        "totals": {"file": "LA/lao_admpop_adm2_2024.csv",
+                   "url": "https://data.humdata.org/dataset/f9ec8c86-e300-443b-bd04-a6c9923c29ef/resource/"
+                          "87e60232-7af8-43c3-bc47-685f2a770ab1/download/lao_admpop_adm2_2024.csv",
+                   "code": "ADM2_PCODE", "pop": "T_TL"},
+        "parent": None,
+        "national_total": (7_631_798, 0.0001),  # the file's adm0 row (lao_admpop_adm0_2024.csv)
+        "mode": "factor",
+    },
+    # T-3763: GHS-POP gives counties split off a city the city's whole count (Sarvestan 1.74M against 38,114, beside
+    # Shiraz), wrong by province too (Fars 1.87), so shares of GHSL's national total (2016 to 2020's growth GHSL's), as
+    # the plan's people (world_plan.plan_factors)
+    "IR": {
+        "source": "Statistical Centre of Iran, 2016 census by county, COD-PS IRN on HDX, on COD-AB IRN counties (HDX, "
+                  "CC BY-IGO)",
+        "polygons": {"file": "IR/irn_admin_boundaries.shp.zip",
+                     "url": "https://data.humdata.org/dataset/247b4026-79ff-4b16-95b9-0f366792d2cc/resource/"
+                            "3652644d-b572-4736-8d66-834c1cbc6bc7/download/irn_admin_boundaries.shp.zip",
+                     "mirror": "religiondots/data/raw/ir/irn_admin_boundaries.shp.zip",
+                     "layer": "irn_admin2", "code": "adm2_pcode", "name": "adm2_name"},
+        "totals": {"file": "IR/irn_admpop_adm2_2016_v2.csv",
+                   "url": "https://data.humdata.org/dataset/07f4ec78-42c7-4606-ae62-4f1bff918c45/resource/"
+                          "81700d7b-fbea-49ab-9972-c867231cb3c0/download/irn_admpop_adm2_2016_v2.csv",
+                   "mirror": "religiondots/data/raw/ir/irn_admpop_adm2_2016_v2.csv",
+                   "code": "ADM2_PCODE", "pop": "T_TL"},
+        "parent": None,
+        "national_total": (79_926_270, 0.0001),  # the 2016 census
+        "mode": "shares",
+        "hold": r"^(IR)\d+$",
+    },
+    # T-3764: GHS-POP holds 0.41-0.59 of every Balochistan district's 2023 count (Quetta 1.11M against 2.27M; the
+    # province 8.24M against 14.56M), the rest of Pakistan 0.82-1.06 of it by province, so Balochistan only. The census
+    # districts as religiondots drew them (COD-AB PAK districts, Lehri's tehsils returned to Sibi and Kachhi;
+    # religiondots/sources/pk_2023_geo.py) carry PBS's Table 9 totals in the same layer
+    "PK": {
+        "source": "Pakistan Bureau of Statistics, 2023 census Table 9 by district, on COD-AB PAK districts (HDX, CC BY-IGO) "
+                  "redrawn to the census's districts",
+        "polygons": {"file": "PK/pk_districts.gpkg", "mirror": "religiondots/data/geo/pk2023/pk_districts.gpkg",
+                     "layer": "districts", "code": "unit", "name": "geo_name"},
+        "totals": {"file": "PK/pk_districts.gpkg", "mirror": "religiondots/data/geo/pk2023/pk_districts.gpkg",
+                   "layer": "districts", "code": "unit", "pop": "census_pop"},
+        "parent": None,
+        "only": r"PK23-balochistan/.+",
+        "national_total": (14_562_011, 0.0001),  # Table 9's Balochistan row (the headline 14,894,402 is another tabulation)
+        "mode": "factor",
+    },
 }
 
 

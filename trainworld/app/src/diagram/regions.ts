@@ -18,7 +18,8 @@ export const REGION_MAX_KM = 1200;
 /** drawn regions keep at least this many pitches between their boxes (the sea drawn round each included) */
 export const REGION_GAP_PITCHES = 24;
 
-const KM_PER_DEG = 111.195, RAD = Math.PI / 180;
+export const KM_PER_DEG = 111.195;
+const RAD = Math.PI / 180;
 
 /** each node's lng, lat */
 export function nodeLngLat(g: DiagramGraph): { lng: Float64Array; lat: Float64Array } {
@@ -143,6 +144,10 @@ export function regionSig(g: DiagramGraph, names: string[], widths: ArrayLike<nu
   if (g.hop) all(g.hop);
   for (const l of g.lines) {
     add(l.id), all(l.chain), all(l.stop), add(l.fast ? 1 : 0), add(l.tram ? 1 : 0), add(l.oneWay ? 1 : 0);
+    // T-3409: a cut run's place in its line and its stubs
+    if (l.from !== undefined) add(l.from);
+    if (l.stubA) all(l.stubA);
+    if (l.stubB) all(l.stubB);
     for (let i = 0; i < l.colour.length; i++) add(l.colour.charCodeAt(i));
   }
   for (const s of names) for (let i = 0; i < s.length; i++) add(s.charCodeAt(i));
@@ -225,7 +230,7 @@ export function mergeParts(parts: Part[], at: Placed[]): Part & { partOf: Int32A
   const d: Drawing = { pitch: P, stroke: parts[0].d.stroke * at[0].s, lines: [], lineOf: [], ribbons: [], chainAt: [], pills: [], pillOf: [], passages: [], passageOf: [], hooks: [], small, box: [Infinity, Infinity, -Infinity, -Infinity] };
   const anyBorders = parts.some((p) => p.d.borders), anyWater = parts.some((p) => p.d.water);
   const bCmds: Float64Array[] = [], bZones: string[] = [], bZoneOf = new Int32Array(nn).fill(-1);
-  const water = { rivers: [] as Float64Array[], bands: [] as number[], riverEnds: [] as Float64Array[], sea: [] as Float64Array[], seaRings: [] as Float64Array[] };
+  const water = { rivers: [] as Float64Array[], bands: [] as number[], riverEnds: [] as Float64Array[], sea: [] as Float64Array[], seaRings: [] as Float64Array[], fillets: [] as Float64Array[] };
   const p0 = parts[0].names;
   const at2: { node: number[]; x: number[]; y: number[]; dir: number[]; slide: number[]; lift: number[]; wrap: number[] }[] = p0.levels.map(() => ({ node: [], x: [], y: [], dir: [], slide: [], lift: [], wrap: [] }));
   const text: string[] = [], width: number[] = [], width2: number[] = [];
@@ -243,7 +248,8 @@ export function mergeParts(parts: Part[], at: Placed[]): Part & { partOf: Int32A
       for (let q = g.first[e]; q < g.first[e + 1]; q++) on.push(g.on[q] + lb), stroke.push(g.stroke[q] + lb);
     }
     // the drawing
-    for (const l of pd.lines) d.lines.push({ colour: l.colour, fast: l.fast, tram: l.tram, oneWay: l.oneWay, cmds: moveCmds(l.cmds, t) });
+    for (const l of pd.lines) d.lines.push({ colour: l.colour, fast: l.fast, tram: l.tram, oneWay: l.oneWay, bus: l.bus, ferry: l.ferry, cmds: moveCmds(l.cmds, t) });
+    if (pd.dot) (d.dot ??= new Uint8Array(nn)).set(pd.dot, nb);
     for (const li of pd.lineOf) d.lineOf.push(li + lb);
     for (const r of pd.ribbons) d.ribbons.push(movePairs(r, t));
     for (const c of pd.chainAt) d.chainAt.push(c);
@@ -252,6 +258,7 @@ export function mergeParts(parts: Part[], at: Placed[]): Part & { partOf: Int32A
     for (const q of pd.passages) d.passages.push([q[0] * t.s + t.ox, q[1] * t.s + t.oy, q[2] * t.s + t.ox, q[3] * t.s + t.oy]);
     for (const k of pd.passageOf) d.passageOf.push(k + nb);
     for (const k of pd.hooks) d.hooks.push(k + nb);
+    for (const l of pd.thin ?? []) (d.thin ??= []).push({ id: l.id, colour: l.colour, ferry: l.ferry, cmds: moveCmds(l.cmds, t), ribbon: movePairs(l.ribbon, t), stops: movePairs(l.stops, t) });
     const b = pd.box;
     (d.box[0] = Math.min(d.box[0], b[0] * t.s + t.ox)), (d.box[1] = Math.min(d.box[1], b[1] * t.s + t.oy)), (d.box[2] = Math.max(d.box[2], b[2] * t.s + t.ox)), (d.box[3] = Math.max(d.box[3], b[3] * t.s + t.oy));
     if (pd.borders) {
@@ -266,6 +273,7 @@ export function mergeParts(parts: Part[], at: Placed[]): Part & { partOf: Int32A
       for (const w of wa.bands) water.bands.push(w * t.s);
       for (const r of wa.riverEnds ?? []) water.riverEnds.push(moveCmds(r, t));
       if (wa.sea) water.sea.push(moveCmds(wa.sea, t));
+      if (wa.fillets) water.fillets.push(moveCmds(wa.fillets, t));
       for (const r of wa.seaRings ?? []) water.seaRings.push(movePairs(r, t));
     }
     // the names
@@ -292,10 +300,13 @@ export function mergeParts(parts: Part[], at: Placed[]): Part & { partOf: Int32A
     d.borders = { cmds: all, zones: bZones, zoneOf: bZoneOf };
   }
   if (anyWater) {
-    const sea = new Float64Array(water.sea.reduce((s, c) => s + c.length, 0));
-    let o = 0;
-    for (const c of water.sea) sea.set(c, o), (o += c.length);
-    d.water = { rivers: water.rivers, bands: water.bands, riverEnds: water.riverEnds, sea, seaRings: water.seaRings, stats: parts.find((p) => p.d.water)!.d.water!.stats };
+    const join = (cs: Float64Array[]) => {
+      const all = new Float64Array(cs.reduce((s, c) => s + c.length, 0));
+      let o = 0;
+      for (const c of cs) all.set(c, o), (o += c.length);
+      return all;
+    };
+    d.water = { rivers: water.rivers, bands: water.bands, riverEnds: water.riverEnds, sea: join(water.sea), seaRings: water.seaRings, ...(water.fillets.length ? { fillets: join(water.fillets) } : {}), stats: parts.find((p) => p.d.water)!.d.water!.stats };
   }
   const names: NamePlan = {
     levels: p0.levels, faint: p0.faint, fontPx: p0.fontPx, ms, text, width: Float32Array.from(width), width2: Float32Array.from(width2),

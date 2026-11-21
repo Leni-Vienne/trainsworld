@@ -11,7 +11,9 @@ import type { ComponentChildren } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { demandAt, lineSeconds } from "../../game/clock";
 import { periodAt } from "../../game/periods";
-import { count, distance, duration, metresFromShown, metresToShown, money, shortDistance } from "../../game/format";
+import { count, distance, distUnit, duration, exact, metresFromShown, metresToShown, millions, money, perDistance, shortDistance, speed } from "../../game/format";
+import { moneyState } from "../../game/money";
+import { BOATS, boatOf, boatStock, type Boat } from "../../game/boats";
 import { t } from "../../i18n";
 import { useToday } from "../../game/today";
 import { DEMAND_INDEX, type LineInput, type LineStats } from "../../game/types";
@@ -20,8 +22,8 @@ import { live } from "../../map/live";
 import { editBusRoute, editFerryRoute, toggleEditStops } from "../../game/lineActions";
 import { busDraft } from "../../map/busDraw";
 import { ferryDraft } from "../../map/ferryDraw";
-import { edit, linesById, say, stationNames, world } from "../../game/world";
-import { Icon, Row, Segmented, Stepper, SwapLabel } from "../widgets";
+import { edit, fleetOf, linesById, say, stationNames, world } from "../../game/world";
+import { Check, Icon, Row, Segmented, Stepper, SwapLabel } from "../widgets";
 import { demandView, complexTransfers } from "../../game/demand";
 import { placesNear, hoodsNear, townsNear } from "../../game/placeList";
 import { endsInStation, placeName } from "../../map/stationNames";
@@ -30,7 +32,7 @@ import { RoundTrip, ScheduleButtons, StopToday, StopTransfers, StretchHalf, stre
 import { LineFare, LineMoney } from "./LineMoney";
 import { PurposeSplit } from "./PurposeSplit";
 import { drawnReversed } from "../../game/northUp";
-import { AverageSpeed, PastDay, Schedule, useLinePeriods } from "./schedule";
+import { AverageSpeed, boatsBought, PastDay, Schedule, useLinePeriods } from "./schedule";
 import { LineTitle, useLineTitle } from "./LineTitle";
 import { afterCopy } from "../../game/lineGroups";
 
@@ -290,6 +292,51 @@ function ChangingToTrains({ l, bus }: { l: LineInput; bus: ClockBus }) {
 
 // ---------------------------------------------------------------- the panel
 
+/** T-3892: a ferry line's boat size, where a train line has its train type: each hover its riders and speed, and on
+ * a running line what the switch buys beyond that size's spare boats (the old ones stay in the depot). */
+function BoatSize({ l, st, bus }: { l: LineInput; st: LineStats; bus: ClockBus }) {
+  const m = moneyState.value, now = boatOf(bus);
+  const tip = (b: Boat) => {
+    let s = t("busInspector.boatTip", { riders: exact(BOATS[b].riders), speed: speed(BOATS[b].kmh) });
+    const need = fleetOf(st);
+    if (m && b !== now && st.status === "running" && need > 0) {
+      const k = boatStock(m, b);
+      s += "\n" + boatsBought({ price: k.price, spare: Math.max(0, k.owned - k.needed) }, need);
+    }
+    return s;
+  };
+  const sizes: [Boat, string][] = [[0, t("busInspector.boatSmall")], [1, t("busInspector.boatMedium")], [2, t("busInspector.boatLarge")]];
+  return (
+    <li>
+      <span class="grow">{t("busInspector.boat")}</span>
+      <Segmented<Boat>
+        options={sizes.map(([b, name]) => [b, <span data-tip={tip(b)}>{name}</span>])}
+        value={now}
+        onChange={(boat) => { if (boat !== now) void edit({ op: "ferryBoat", line: l.num, boat }); }}
+      />
+    </li>
+  );
+}
+
+/** T-3907: a bus line on BRT or off it: bus lanes along the whole route, its buses at no less than the BRT floor.
+ * On a constructed line switching on is paid at once; off gives nothing back. */
+function BrtRow({ l, bus }: { l: LineInput; bus: ClockBus }) {
+  const m = moneyState.value;
+  const [asked, setAsked] = useState<boolean | null>(null);
+  const on = asked ?? bus.brt;
+  // T-3907: paid and upkept over the road in town only
+  const tip = m ? t("busInspector.brtTip", { speed: speed(m.brtKmh), price: millions(perDistance(m.brtRouteKm)), upkeep: money(perDistance(m.upkeepBrtKm * m.economy)), unit: distUnit(), town: distance(bus.townM) }) : undefined;
+  const set = (to: boolean) => {
+    setAsked(to);
+    void edit({ op: "busBrt", line: l.num, on: to }).then(() => setAsked(null));
+  };
+  return (
+    <li>
+      <Check checked={on} onChange={set} tip={tip}>{t("busInspector.brt")}</Check>
+    </li>
+  );
+}
+
 export function BusInspector({ id }: { id: string }) {
   const w = world.value;
   const [copying, setCopying] = useState(false);
@@ -388,6 +435,8 @@ export function BusInspector({ id }: { id: string }) {
 
       <Schedule l={l} st={st} period={periodAt(lineSeconds(st))} crowd={periods} copy={<ScheduleButtons l={l} st={st} />} />
       <ul class="rows">
+        {ferry && <BoatSize l={l} st={st} bus={bus} />}
+        {!ferry && <BrtRow l={l} bus={bus} />}
         <AverageSpeed st={st} lev={lev} />
       </ul>
 

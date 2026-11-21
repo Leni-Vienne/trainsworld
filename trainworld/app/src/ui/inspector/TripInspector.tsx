@@ -8,9 +8,10 @@ import { Fragment } from "preact";
 import { capitalise, count, distance, distUnit, exact, speed } from "../../game/format";
 import { modeColours } from "../../game/palette";
 import { PERIODS } from "../../game/periods";
+import { transitParts, tripTransit } from "../../game/transitModes";
 import { purposeName, purposeWords, type PurposeFilter } from "../../game/purposes";
 import { WALK_KMH } from "../../game/walks";
-import { baseFareOf, cityMinPerUsd, countedPeople, countsTrain, openRoute, routeCrowding, roomVehicle, routeLabel, routeTerms, routeTotals, stationName, tripOpenedFrom, tripPeriod, tripView, wholePeople, type TripMix, type TripPeriod, type TripRoute } from "../../game/trip";
+import { baseFareOf, cityMinPerUsd, countedPeople, countsTrain, openRoute, pairCost, routeCrowding, roomVehicle, routeLabel, routeTerms, routeTotals, routeVehicle, stationName, tripOpenedFrom, tripPeriod, tripView, wholePeople, type TripMix, type TripPeriod, type TripRoute } from "../../game/trip";
 import { purposeFilter, selection, shownDayPhrase } from "../../game/ui";
 import { linesById, stationNames, world } from "../../game/world";
 import { lowerWord, t as tr, tRich, tSeries } from "../../i18n";
@@ -18,7 +19,7 @@ import { shownPeriod } from "../../map/tripView";
 import { Actions, SegBar } from "../widgets";
 import { MarketTrip } from "./MarketTrip";
 import { legRows, PeriodRows, routeRow, StationLink } from "./RouteParts";
-import { BUS_BOARD_FELT_MIN, equation, minFix1, minNum1, minRound, minText, modeName, noRoad, num1, pct1, pctShare, rideTip, roundTo, sumLine, termLabel, tripsAmount, tripWords, usd, type ModeId, type Term } from "./tripText";
+import { equation, minFix1, minNum1, minRound, minText, modeName, noRoad, num1, pct1, pctShare, rideTip, roundTo, sumLine, termLabel, tripsAmount, tripWords, usd, type ModeId, type Term } from "./tripText";
 
 /** T-910: why the train is not offered. Too long a way to and from the trains says which end
  * holds it back: people drive to a station from home on trips of `rideMinKm` or more, and walk
@@ -41,8 +42,10 @@ function NoRail({ t }: { t: TripPeriod }) {
 const trips = (n: number, f: PurposeFilter) => tripsAmount(count(n), n, f);
 
 /** The effective time hover (T-699), the train's: the terms are the route's (the worker's perceived
- * minutes); the model's figure pools every station and route people use, so it is lower than the
- * main route's sum by a last term. `pooled` false: the route's own sum alone (T-870). */
+ * minutes), then two that take it to the model's figure (T-3822): its station pair's cost less its own
+ * sum, since riders board whichever useful departure comes first (either sign), and the choice of
+ * routes, the logsum over every station pair people use less that pair's cost (never a plus).
+ * `pooled` false: the route's own sum alone (T-870). */
 function trainEquation(t: TripPeriod, r: TripRoute, pooled = true): string {
   const terms: Term[] = routeTerms(t, r).filter((x) => x.perceived !== 0 || x.unit === "usd").map((x) => ({
     label: termLabel(x.id, x.vehicle),
@@ -52,10 +55,23 @@ function trainEquation(t: TripPeriod, r: TripRoute, pooled = true): string {
     ...(x.unit === "usd" ? { usd: true } : {}),
   }));
   if (!pooled) return equation(terms);
-  const rest = t.railPerceived - terms.reduce((s, x) => s + x.perceived, 0);
-  // i18n-ignore: term id
-  if (Math.abs(rest) >= 0.05) terms.push({ label: termLabel("choice of routes"), real: "", weight: 1, perceived: rest });
-  return equation(terms, t.railPerceived) + (Math.abs(rest) >= 0.05 ? "\n" + tr("tripInspector.choiceOfRoutes") : "");
+  const pair = t.pairs[r.pair];
+  const own = terms.reduce((s, x) => s + x.perceived, 0);
+  const first = pair ? pairCost(t, pair) - own : 0;
+  const choice = t.railPerceived - own - first;
+  const vehicle = routeVehicle(r);
+  const lines: string[] = [];
+  if (Math.abs(first) >= 0.05) {
+    // i18n-ignore: term id
+    terms.push({ label: termLabel("first to come", vehicle), real: "", weight: 1, perceived: first });
+    lines.push(tr("tripInspector.firstToCome", { vehicle }));
+  }
+  if (Math.abs(choice) >= 0.05) {
+    // i18n-ignore: term id
+    terms.push({ label: termLabel("choice of routes"), real: "", weight: 1, perceived: choice });
+    lines.push(tr("tripInspector.choiceOfRoutes"));
+  }
+  return [equation(terms, t.railPerceived), ...lines].join("\n");
 }
 
 /** The real minutes of a route as an equation: "Walk 8 + wait 3 + ride 6 = 17 min". */
@@ -103,10 +119,14 @@ function ModeBar({ t, mix, of }: { t: TripPeriod; mix: TripMix | null; of: strin
   // walking and driving between two land parts are 0: their rows go, By car and By walking say why
   const shown = (m: Mode, v: number) => (t.apart && (m === "walk" || m === "drive") ? v > 0 : m !== "walk" || v > 0 || t.walkMin < WALK_ROW_MIN);
   const modeOf = (m: Mode, share: string) => tr("tripText.modeOf", { mode: modeName(m), share, of });
+  // T-3695: with the setting on, the train part by the kinds of line its routes ride, by leg length
+  const shares = tripTransit(t.routes);
+  const segs = parts.flatMap(([m, v, c]): { name: string; share: number; cls?: string; colour?: string; tip: string }[] => (m === "train" && shares
+    ? transitParts(v, shares).map((p) => ({ name: p.name, share: p.n, colour: p.colour, tip: tr("tripText.modeOf", { mode: p.name, share: pctShare(p.n), of }) }))
+    : [{ name: modeName(m), share: v, cls: c, tip: modeOf(m, pctShare(v)) + extra(m) + stands(m) }]));
   return (
     <div class="trip-modes">
-      <SegBar kind="trip-bar" label={tSeries(parts.map(([m, v]) => tr("tripText.modeShare", { mode: modeName(m), share: pctShare(v) })))}
-        parts={parts.map(([m, v, c]) => ({ share: v, cls: c, tip: modeOf(m, pctShare(v)) + extra(m) + stands(m) }))} />
+      <SegBar kind="trip-bar" label={tSeries(segs.map((p) => tr("tripText.modeShare", { mode: p.name, share: pctShare(p.share) })))} parts={segs} />
       <ul class="rows">
         {parts.map((x, i) => [x, i] as const).filter(([[m, v]]) => shown(m, v)).map(([[m, v], i]) => (
           <li data-tip={modeOf(m, n > 0 ? pctShare(v) : pct1(v)) + extra(m) + modelTip(i) + note + stands(m)}>
@@ -140,9 +160,8 @@ function RouteLegs({ t, r }: { t: TripPeriod; r: TripRoute }) {
       )}
       {legRows(r, name, ln, (l) => {
         // T-842: riders arriving when no train is due for hours weigh on the wait as felt
-        // the felt wait also carries the bus boarding cost (sim `BUS_BOARD_MIN`, T-1576), which is no service gap
         const st = w.lineStats[l.line];
-        return rideTip(l, st, l.fullWaitMin, Math.max(0, l.waitPerceived - l.waitMin - (st?.bus ? BUS_BOARD_FELT_MIN : 0)));
+        return rideTip(l, st, l.fullWaitMin, Math.max(0, l.waitPerceived - l.waitMin));
       })}
       {pair && last && (
         <li data-tip={walkTip(pair.egressM, pair.egressMin)}>

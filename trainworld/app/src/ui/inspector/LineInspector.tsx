@@ -40,7 +40,6 @@ import { useClockQuery } from "../useClockQuery";
 import type { Vehicle } from "../../game/vehicle";
 import { drawnReversed } from "../../game/northUp";
 import { partwayReversals, turnedLine, type TurnRow } from "../../game/turnedLine";
-import { MareyButton } from "./MareyChart";
 import { ScheduleButton } from "./SchedulePanel";
 import { LineProfile } from "./LineProfile";
 import { LineTopSpeed } from "./LineTopSpeed";
@@ -211,6 +210,9 @@ export function RoundTrip({ num, st, lev, stops, spots: { spots: busy, behindSpo
             <Segmented<boolean>
               options={[[true, <span data-tip={tr("lineInspector.oneWayTip")}>{tr("lineInspector.oneWay")}</span>], [false, tr("lineInspector.bothWays")]]}
               value={st.oneWay}
+              // T-3835: one-way track takes this loop round one way only
+              disabled={(v) => !v && !!st.oneWayByTrack}
+              tips={(v) => (!v && st.oneWayByTrack ? tr("lineInspector.oneWayTrack") : undefined)}
               onChange={(oneWay) => { if (oneWay !== st.oneWay) void edit({ op: "lineOneWay", line: num, oneWay }); }}
             />
           </li>
@@ -634,16 +636,15 @@ function stretchTip(s: { reached: number; limit: number; why: number } | undefin
   // T-2927: on a tram line the track's cap is street tram track's 60 km/h or tram track's 80
   const track = !tram ? "track" : s.limit <= TRACK_SPECS.streetTram.vCapKmh + 0.5 ? "street" : "tram";
   // i18n-ignore: select option names; T-3405: 4 is a piece's own speed limit
-  const why = s.why === 4 ? tr("lineInspector.whyLimit", { speed: lim, vehicle }) : tr("lineInspector.why", { why: s.why === 0 ? "top" : s.why === 1 ? track : s.why === 2 ? "curve" : "crossover", speed: lim, vehicle });
+  // T-3027: 5 is a ramp
+  const why = s.why === 4 ? tr("lineInspector.whyLimit", { speed: lim, vehicle }) : s.why === 5 ? tr("lineInspector.whyRamp", { speed: lim, vehicle }) : tr("lineInspector.why", { why: s.why === 0 ? "top" : s.why === 1 ? track : s.why === 2 ? "curve" : "crossover", speed: lim, vehicle });
   return tr("lineInspector.reach", { speed: speed(s.reached), vehicle }) + "\n" + why + (s.reached < s.limit - 1 ? "\n" + tr("lineInspector.tooClose") : "");
 }
 
-/** The chart and schedule panel buttons beside the Schedule heading (T-3543: the copy and paste buttons are gone;
- * a default for new lines is set in the schedule panel). A bus or ferry line has the schedule panel's alone (T-3703). */
+/** The schedule panel button beside the Schedule heading (T-3543: a default for new lines is set in the schedule panel). */
 export function ScheduleButtons({ l, st }: { l: LineInput; st: LineStats }) {
   return (
     <span class="sched-copy">
-      <MareyButton st={st} />
       <ScheduleButton l={l} st={st} />
     </span>
   );

@@ -387,6 +387,7 @@ tag over a point states what these do there. Loops are described under each tool
 |---|---|---|---|
 | Left click, empty ground | Add a point at the active end | Hint only | Add a stop on the route |
 | Left click, a station not in the line | Ferry: add that port | Add a stop | none |
+| Shift click, water | Ferry: place a waypoint (below) | none | none |
 | Left click, a middle or the first point or stop | Delete it | Remove it | Remove it |
 | Left click, the last point | Save the route (the tag says so) | Remove it | none |
 | Left click, a lone point | Nothing | Remove it | none |
@@ -417,7 +418,7 @@ point. Between two points the route takes the shortest path over the basemap's z
 (`busRoads.ts`; trunk, primary, secondary, tertiary, minor and bus-only roads, and motorways, so the
 long bridges and tunnels most cities carry on them (T-2469); any direction, or with Settings > "Buses obey one-way streets" ticked only the way a one-way street runs (T-3480, Renkon's open-source PR 1), length as it is, no turn
 rules; service ways, tracks and paths are left out, except that a plain service road (no driveway, alley or parking aisle tag, open to all, at ground level) at most 60 m long with each end within 3 m of a street can be driven, and is never landed on (T-2882)), at most 3 times the straight line or 1 km more
-than it, whichever is longer. With that setting ticked (off by default, `display.busOneWay`; with it off a route is as it was) a one-way street is the basemap's `oneway`: 1 runs with the line as drawn, -1 against it, and a street with no `oneway` runs both ways (`RoadGraph.path`). The route goes round rather than back down a one-way street. While the bus tool is on and the setting is ticked, those one-way streets carry small arrows in the road hint's own colour, pointing the way traffic runs (turned round where `oneway` is -1), from zoom 15, drawn about 1.2 times the road hint's own stroke at each zoom (`bus_roads_oneway` in `basemap.ts`). A two-way street stays a plain line. A line set to both ways, and one that loops back, still runs that drawn road in reverse on the way back (open-source issue 8, a bus going the wrong way round a roundabout, is the same case). Roads join where a road's vertex comes within about 1 m of another road
+than it, whichever is longer. While the tool is on, the roads it may use carry a teal hint (`bus_roads_hint`), from zoom 11; the fast ones, trunk roads and motorways with their ramps (`fastRoadExpr` in `busRoads.ts`, the roads a route marks `K_TRUNK`), are drawn in blue instead (`BUS_FAST_COLOUR`, light #3a4fb0 at 0.85 opacity, dark #a6bcff at 0.9), 1.2 times its width [T-3829; Anita picked it from three looks]. With that setting ticked (off by default, `display.busOneWay`; with it off a route is as it was) a one-way street is the basemap's `oneway`: 1 runs with the line as drawn, -1 against it, and a street with no `oneway` runs both ways (`RoadGraph.path`). The route goes round rather than back down a one-way street. While the bus tool is on and the setting is ticked, those one-way streets carry small arrows in the road hint's own colour on that road (teal, blue on a fast road), pointing the way traffic runs (turned round where `oneway` is -1), from zoom 15, drawn about 1.2 times the road hint's own stroke on that road at each zoom (`bus_roads_oneway` in `basemap.ts`). A two-way street stays a plain line. A line set to both ways, and one that loops back, still runs that drawn road in reverse on the way back (open-source issue 8, a bus going the wrong way round a roundabout, is the same case). Roads join where a road's vertex comes within about 1 m of another road
 at its level, or where two ground-level roads cross, since the tiles drop the junction's vertex from a road
 running straight through it (T-2873; a motorway joins another motorway, and its own ends join any road).
 A click within 100 m of a road lands on the nearest one, a motorway
@@ -540,8 +541,8 @@ lighter; at most 16 of each.
 
 [T-2194; `map/ferryDraw.ts`; design notes/T-2177.md 3.2] The Build tab's Ferry button (beside Bus,
 each half the row, key O) or O from any tab starts
-the ferry tool for a new line. The player places **ports only**; between two consecutive ports the
-route is found over the basemap's water (track-and-service.md 6.8), never drawn by hand.
+the ferry tool for a new line. The player places ports, and waypoints where the route must pass; between
+them the route is found over the basemap's water (track-and-service.md 6.8), never drawn by hand.
 
 - **A click** within the reach of the shore, on land or on the water, puts a new port on the nearest shore
   (T-2468). The reach is 40 screen pixels of ground at the pointer's zoom, at least 200 m and at most 1500 m
@@ -582,6 +583,29 @@ route is found over the basemap's water (track-and-service.md 6.8), never drawn 
   port of it stops it looping back ("Right click to stop looping back"). The touch Loop button works here as in the
   bus tool. In the panel's port list a loop keeps its order (no dragging); taking out its first or last port
   opens it, and one of a ring of three leaves a line of two.
+- **Extending from the other end** (T-3912): new ports go on the last port (the active end). A shift click on the
+  other end of an open route (not a loop, two ports or more) makes it the active end, so new ports go before the
+  first and the pointer leg starts there; a shift click on the last port switches back, and Backspace takes back
+  whichever end is active. The other end's tag adds "Shift click to extend the route from here". Waypoints waiting
+  after the last port are dropped by the switch. Mouse only; a finger has no Shift. The bus tool has the same
+  unused `head` switch and is unchanged.
+- **Waypoints** (T-3809, T-3845): a shift click on water puts a point the route passes through without stopping, so a
+  player steers it through an archipelago, around a peninsula the search's box misses, or splits a leg over the 400
+  km limit. While a new route is drawn it goes after the last point placed, and that leg alone is searched at once
+  (port A, shift click, shift click, click port B: a long A to B is never searched whole; several in a row work); a
+  plain click then places the next port and searches only the leg from the last point. Waypoints after the last
+  port when the line is made are dropped; Backspace or a right click on empty ground takes the last one back. In
+  Edit route (both ends already there) a shift click goes on the leg, and between the waypoints already there,
+  where it adds the least straight distance. A shift click on land is refused ("Place waypoints on water."), and
+  with no port placed ("Place a port before adding a waypoint."). A leg that finds no route is drawn red and the tag
+  says "No water path found"; the points placed stay. With Shift held the tag says "Add waypoint", or the refusal,
+  and dashed ghost lines join the pointer to the point before it (and, in an edit, the one after). Without Shift
+  the tag says "Place port" by the shore and, over water once a port is placed, "Shift click to place waypoint".
+  Each waypoint is a dot in the line's colour, as a bus route's points: a click takes it out, a drag moves it
+  (dropped on land it goes back), a right click does nothing. Waypoints are free, saved as the route's kind 2
+  points and read back by Edit route; a line that loops back passes its way out's waypoints again on the way
+  home. The panel's port list keeps a leg's waypoints while its two ports stay side by side. No touch gesture
+  adds one; a tap on one takes it out.
 - **Finishing** as the bus tool: a click on the active end, a double click, Enter, or Make line (Save
   route) in the tool's bar; fewer than two ports is refused, and so is a leg with no route ("No water
   path found between A and B."). New ports are added with the line as blueprint ports. Escape drops a
@@ -829,10 +853,10 @@ is the pan and Shift+drag is MapLibre's zoom box, so a box needs a mode.
   track is on solid), **Regular**, **High speed** and **Tram** while the pick holds blueprint double track
   [T-1898, T-3108; `kindPicked`, `TrackApi::set_edges_kind`] (the kind all of it is solid, none when
   mixed; High speed's hover gives its 1.5x price): every picked double piece to that kind in one
-  undoable edit, free, by the rules of Rebuild below: rail and tram change as whole joined stretches (they never
-  join), stations are cut to a tram stop or back and lines become tram or train lines with the new kind's dwell and
-  turnaround. Single track, crossovers and pieces the track model refuses (a stretch joined to track outside the
-  pick, a curve too tight for trains) stay as they are and are counted in the message as for
+  undoable edit, free, by the rules of Rebuild below: stations all on tram track are cut to a tram stop or back
+  and lines become tram or train lines by their stops, with the new kind's dwell and turnaround (T-3889: rail and
+  tram join, so any part of a stretch changes). Single track, crossovers and pieces the track model refuses (a curve
+  too tight for trains, track under a train line) stay as they are and are counted in the message as for
   elevation ("3 of 5 pieces set to high-speed track. 2 could not change."). A level or kind picked here
   (its key too) becomes the track tool's as well, as if picked in the track bar (High speed with its top design
   speed, Regular with the speed before it), so the next track placed is laid the same way [T-2474]; a level
@@ -905,17 +929,16 @@ is the pan and Shift+drag is MapLibre's zoom box, so a box needs a mode.
   stations keep their ids, so every line keeps its stops and path, stations keep their names and upgrades, and
   nothing is deleted. The level is set as for blueprint (corners, and every node all of whose track is picked; a
   node with unpicked track keeps its level and the piece ramps to it), and the track type for double track only;
-  rail made tram takes its stations (cut to 80 m tram stops) and lines (now tram lines) with it, and tram made
+  rail made tram takes its stations (cut to 80 m tram stops where all their track is tram) and lines (tram lines once they stop at a tram stop) with it, and tram made
   rail the other way. Every station on the picked track takes the new level, picked or not, and one at an end of
   the pick ramps on the track beyond it, outside the pick (T-3241, the rule in
   [track-and-service.md](track-and-service.md) "Rebuilding constructed track"): that stretch is drawn in the
   pick's band as far as it changes, and counted in the hover's length, the question and the price. A piece the
   track model refuses (no room to ramp to unpicked track or beyond a station, a crossing, a curve too tight for
-  trains, tram track meeting rail) is **refused**: the quote names it, the map outlines it in red over the pick's band,
+  trains, track under a train line that would then run on tram track, one side of a station only) is **refused**: the quote names it, the map outlines it in red over the pick's band,
   and the hover and the question count it ("3 of 12 pieces can't change"); it stays as it was, and the rest
-  ramps to it (T-3087). Pieces that stay only because they cannot change family alone are counted but not drawn
-  red. When nothing can change, Rebuild asks nothing and says why (the track model's refusal, such as "Tram track
-  and train track can't join. They can cross."). The price is the full price of the changed track, and of the
+  ramps to it (T-3087). When nothing can change, Rebuild asks nothing and says why (the track model's refusal, such
+  as "Trains can't run on tram track."). The price is the full price of the changed track, and of the
   stations whose level or type changed (picked or not), built new at the new settings, with nothing back for what was there
   (Anita, 2026-11-10: "full new price, that feels more fair"); trains the longer round trips need are bought as
   for any edit. The hover shows the length and what it becomes, then the price; the question

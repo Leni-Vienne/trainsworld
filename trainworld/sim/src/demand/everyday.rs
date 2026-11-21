@@ -75,13 +75,11 @@ pub const RETURN: [[f32; 5]; KIND_COUNT] = [
 ];
 const AIRPORT: usize = 4;
 pub const ATTRACTION: usize = 6;
-/// T-2196, the ferry fans (Anita, 2026-11-03; docs/demand-mode.md): this share of the visits
-/// (social) and attractions trips count each minute aboard a ferry at `FAN_RIDE_W` of a minute.
-pub const FAN_SHARE: f32 = 0.1;
-pub const FAN_RIDE_W: f32 = 0.1;
-fn fan_kind(kind: usize) -> bool {
-    kind == 1 || kind == ATTRACTION
-}
+/// T-2196, the ferry fans (docs/demand-mode.md): this share of each purpose's trips (`KINDS`) count each
+/// minute aboard a ferry at `FAN_RIDE_W` of a minute. T-3892 (Anita, 2026-11-20: "slightly increase ...
+/// broaden them to all types, maybe half as much for work or medical or airport"): 15% of every purpose, half
+/// the share for airport and medical trips.
+pub const FAN_SHARES: [f32; KIND_COUNT] = [0.15, 0.15, 0.15, 0.15, 0.075, 0.075, 0.15];
 /// The purposes with few samples a cell (T-142): airports and attractions are a handful of
 /// destinations and nobody looks at one cell's medical trips alone (`Sampling::max_few`). Each
 /// sample costs the same at opening and in `set_network`.
@@ -770,135 +768,6 @@ impl LaneWalk<'_> {
     }
 }
 
-const NO_FAN: u16 = u16::MAX;
-
-/// T-2196: what the ferry fans' rail costs, composed through the ports from the period's skims: a
-/// fan's best way from station a to b is the ordinary one or a ride on one ferry, p to q, with the
-/// ordinary ways to p and from q (`sk.r`, a change at each), each minute aboard at `FAN_RIDE_W`.
-/// One ferry ride a trip, and the cheaper of the two ways (no spread between them).
-struct FanCosts {
-    /// each port's station
-    ports: Vec<u32>,
-    /// S x S: the fan's cost where `via` names a port, else unused
-    cost: Vec<f32>,
-    /// S x S: the port left the ferry at, `NO_FAN` where the ordinary way is as cheap
-    via: Vec<u16>,
-    /// S x ports: for a trip from a leaving the ferry at port j, the port boarded at
-    first: Vec<u16>,
-    /// ports x ports: the ride's boarding and alighting route nodes
-    ride: Vec<(u32, u32)>,
-    /// stations with any `via` from them (`row`) or to them (`col`)
-    row: Vec<bool>,
-    col: Vec<bool>,
-}
-
-impl FanCosts {
-    fn new(g: &Graph, p: &Params, sk: &Skims, ferry: &[bool]) -> Option<FanCosts> {
-        let (s, nr) = (g.n_st, g.rn_line.len());
-        let is_ferry = |r: usize| ferry.get(g.rn_line[r] as usize).copied().unwrap_or(false);
-        let mut port_of = vec![NO_FAN; s];
-        let mut ports: Vec<u32> = vec![];
-        for r in (0..nr).filter(|&r| is_ferry(r)) {
-            let st = g.rn_station[r] as usize;
-            if port_of[st] == NO_FAN {
-                port_of[st] = ports.len() as u16;
-                ports.push(st as u32);
-            }
-        }
-        let np = ports.len();
-        if np < 2 || np >= NO_FAN as usize {
-            return None;
-        }
-        // the fan's cost from boarding at port i to leaving at port j, one ferry line, its
-        // boarding as the search has it (the wait and the change's fixed cost, `rn_left`)
-        let mut fr = vec![f32::INFINITY; np * np];
-        let mut ride = vec![(NONE, NONE); np * np];
-        for r in (0..nr).filter(|&r| is_ferry(r) && g.rn_tph[r] > 0.0) {
-            let st = g.rn_station[r] as usize;
-            let Some(board) = (g.adj_off[st] as usize..g.adj_off[st + 1] as usize).find(|&e| g.adj_to[e] as usize == s + r) else {
-                continue;
-            };
-            let i = port_of[st] as usize;
-            let mut c = g.adj_cost[board] + g.rn_left[r];
-            let mut x = r;
-            for _ in 0..nr {
-                let node = s + x;
-                let Some(e) = (g.adj_off[node] as usize..g.adj_off[node + 1] as usize).find(|&e| g.adj_seg[e] as usize == node) else {
-                    break;
-                };
-                c += FAN_RIDE_W * (g.adj_cost[e] - g.rn_fare[x]) + g.rn_fare[x];
-                x = g.adj_to[e] as usize - s;
-                let j = port_of[g.rn_station[x] as usize] as usize;
-                if j != i && c < fr[i * np + j] {
-                    fr[i * np + j] = c;
-                    ride[i * np + j] = (r as u32, x as u32);
-                }
-                if x == r {
-                    break;
-                }
-            }
-        }
-        // per station a and port j, the best way to leave the ferry at j: the ordinary way to a
-        // port i (none from i itself, whose boarding is the first and so has no change cost)
-        let chg = p.change_min();
-        let mut to_j = vec![f32::INFINITY; s * np];
-        let mut first = vec![NO_FAN; s * np];
-        for a in 0..s {
-            for (i, &pi) in ports.iter().enumerate() {
-                let to = if a == pi as usize { -chg } else { sk.r[a * s + pi as usize] };
-                if !to.is_finite() {
-                    continue;
-                }
-                for j in 0..np {
-                    let v = to + fr[i * np + j];
-                    if v < to_j[a * np + j] {
-                        to_j[a * np + j] = v;
-                        first[a * np + j] = i as u16;
-                    }
-                }
-            }
-        }
-        let mut cost = vec![0f32; s * s];
-        let mut via = vec![NO_FAN; s * s];
-        let (mut row, mut col) = (vec![false; s], vec![false; s]);
-        let mut js: Vec<(usize, usize, f32)> = vec![];
-        for a in 0..s {
-            js.clear();
-            js.extend((0..np).filter(|&j| to_j[a * np + j].is_finite()).map(|j| (j, ports[j] as usize, to_j[a * np + j])));
-            if js.is_empty() {
-                continue;
-            }
-            for b in (0..s).filter(|&b| b != a) {
-                let mut best = sk.r[a * s + b];
-                if !best.is_finite() {
-                    continue;
-                }
-                let mut bj = NO_FAN;
-                for &(j, q, v) in &js {
-                    let v = if b == q { v } else { v + chg + sk.r[q * s + b] };
-                    if v < best {
-                        best = v;
-                        bj = j as u16;
-                    }
-                }
-                if bj != NO_FAN {
-                    cost[a * s + b] = best;
-                    via[a * s + b] = bj;
-                    row[a] = true;
-                    col[b] = true;
-                }
-            }
-        }
-        if !row.contains(&true) {
-            return None;
-        }
-        Some(FanCosts { ports, cost, via, first, ride, row, col })
-    }
-    fn np(&self) -> usize {
-        self.ports.len()
-    }
-}
-
 /// T-2196: the fans' rides on the ferries (`FanCosts`), per purpose kind and port pair: riders, those
 /// whose trip starts at the port boarded and those whose trip ends at the port left. Their rides
 /// to and from the ports are in the assignment's station pairs; here each ride is put on the ferry's
@@ -1525,12 +1394,16 @@ impl EverydayApi {
                     }
                     let (a0, b0) = (a.start, b.start);
                     let keep = |ka: usize, kb: usize| kept_rows[ka - a0] >> (kb - b0) & 1 != 0;
-                    if sum < 1e-30 {
+                    // T-3888: the walk tier rides where the rule keeps no pair too
+                    let t = if apart || all_sum < 1e-30 { 0.0 } else { p.tier_at(cw) };
+                    let kept = sum >= 1e-30;
+                    if !kept && t == 0.0 {
                         continue;
                     }
                     // T-2196: the fans' sum, where a ferry is the fans' cheaper way between any
                     // of the pair's station pairs; elsewhere they choose as everyone does
-                    let mut fan = fans.filter(|fc| fan_kind(pair.kind() as usize) && a.clone().any(|ka| fc.row[sz.acc_st[ka] as usize]) && b.clone().any(|kb| fc.col[sz.acc_st[kb] as usize]));
+                    let fan_share = FAN_SHARES[pair.kind() as usize];
+                    let mut fan = fans.filter(|fc| kept && fan_share > 0.0 && a.clone().any(|ka| fc.row[sz.acc_st[ka] as usize]) && b.clone().any(|kb| fc.col[sz.acc_st[kb] as usize]));
                     let mut sum_f = sum;
                     if let Some(fc) = fan {
                         // each station pair's exp of the fans' cost where it is theirs, for the
@@ -1564,7 +1437,8 @@ impl EverydayApi {
                     // T-3624: the purpose's weight on the car, before anything reads it
                     let cm = car_mul(pair.kind() as usize);
                     let (road, paid) = (road * cm, paid * cm);
-                    let rail = ma + mb + p.fare_min - fast_ln(sum) / th + off;
+                    let rail = if kept { ma + mb + p.fare_min - fast_ln(sum) / th + off } else { f32::INFINITY };
+                    let rail_all = if t > 0.0 { ma + mb + p.fare_min - fast_ln(all_sum) / th + off } else { rail };
                     let bt = p.mode_beta(road);
                     let uw = bt * (road - cw) + p.asc_walk();
                     let choice = |rail: f32| {
@@ -1572,16 +1446,18 @@ impl EverydayApi {
                             return (p.bound_share(rail, road, paid, free), p.bound_share(rail + FARE_D_MIN, road, paid, free));
                         }
                         let util = bt * (road - rail) + p.asc_rail;
-                        let pr = p.car_choice(util, uw, bt, paid, free, rail, road);
-                        let prd = p.car_choice(util - bt * FARE_D_MIN, uw, bt, paid, free, rail + FARE_D_MIN, road);
+                        let pr = p.tier_choice(t, kept, util, uw, bt, paid, free, rail, rail_all, road);
+                        let prd = p.tier_choice(t, kept, util - bt * FARE_D_MIN, uw, bt, paid, free, rail + FARE_D_MIN, rail_all + FARE_D_MIN, road);
                         (pr, prd)
                     };
+                    // T-3888: the walk tier's part of the rail share, loaded on every pair
+                    let pr_t = if t > 0.0 { t * p.ratio_mix(rail_all, road, paid, free) } else { 0.0 };
                     let (pr0, prd0) = choice(rail);
                     // the fans' rail share beside everyone else's
                     let fan_pr = fan.map(|_| choice(ma + mb + p.fare_min - fast_ln(sum_f) / th + off));
                     let (pr, prd) = match fan_pr {
                         None => (pr0, prd0),
-                        Some((pf, pdf)) => ((1.0 - FAN_SHARE) * pr0 + FAN_SHARE * pf, (1.0 - FAN_SHARE) * prd0 + FAN_SHARE * pdf),
+                        Some((pf, pdf)) => ((1.0 - fan_share) * pr0 + fan_share * pf, (1.0 - fan_share) * prd0 + fan_share * pdf),
                     };
                     probability[i][direction] = pr;
                     let share = if direction == 0 {
@@ -1600,8 +1476,22 @@ impl EverydayApi {
                         unr_lost[pair.kind() as usize] += (pair.trips * share * pr) as f64;
                     }
                     od_used = true;
+                    if pr_t > 0.0 {
+                        let trips = pair.trips * share * pr_t / all_sum;
+                        let mut c = pair_c.iter();
+                        for ka in a.clone() {
+                            let ia = sz.acc_st[ka] as usize;
+                            cols.rows[ia] = true;
+                            for kb in b.clone() {
+                                od[ia * s + sz.acc_st[kb] as usize] += trips * *c.next().unwrap();
+                            }
+                        }
+                    }
+                    if !kept {
+                        continue;
+                    }
                     let (Some(fc), Some((pf, _))) = (fan, fan_pr) else {
-                        let trips = pair.trips * share * pr / sum;
+                        let trips = pair.trips * share * (pr - pr_t) / sum;
                         for ka in a.clone() {
                             cols.rows[sz.acc_st[ka] as usize] = true;
                             for kb in b.clone() {
@@ -1617,8 +1507,8 @@ impl EverydayApi {
                     };
                     // everyone else's trips by the ordinary costs; the fans' by theirs, those
                     // riding a ferry as the rides to and from its ports, the ride itself apart
-                    let trips = pair.trips * share * (1.0 - FAN_SHARE) * pr0 / sum;
-                    let trips_f = pair.trips * share * FAN_SHARE * pf / sum_f;
+                    let trips = pair.trips * share * (1.0 - fan_share) * (pr0 - pr_t) / sum;
+                    let trips_f = pair.trips * share * fan_share * (pf - pr_t) / sum_f;
                     let np = fc.np();
                     let mut e = fan_e.iter();
                     for ka in a.clone() {
@@ -2082,6 +1972,10 @@ impl EverydayApi {
     pub fn set_back_stops(&mut self, back: &[u32]) {
         self.engine.set_back_stops(back);
     }
+    /// `DemandApi::set_stairs` (T-3888).
+    pub fn set_stairs(&mut self, ferry_lines: &[u8], grade_stops: &[u8]) {
+        self.engine.set_stairs(ferry_lines, grade_stops);
+    }
     pub fn set_network(
         &mut self,
         xy: &[f32],
@@ -2158,7 +2052,7 @@ impl EverydayApi {
         Ok(())
     }
     /// T-2196: which lines are ferries, a byte a line in `set_network`'s order (1 a ferry), after
-    /// it; empty with none. Their fans ride them (`FAN_SHARE`).
+    /// it; empty with none. Their fans ride them (`FAN_SHARES`).
     pub fn set_ferry(&mut self, lines: &[u8]) -> Result<(), String> {
         let nl = self.engine.svc.as_ref().map_or(0, |s| s.line_off.len() - 1);
         if !lines.is_empty() && lines.len() != nl {

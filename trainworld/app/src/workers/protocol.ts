@@ -8,7 +8,7 @@
 // model's frame); what the renderer draws comes back in local units (map/geo.ts). Money in
 // messages is US$M, as in the track model.
 
-import type { BuildingInput, EdgeId, Level, NodeId } from "../game/types";
+import type { BuildingInput, EdgeId, Level, NodeId, OuterGroup } from "../game/types";
 import type { FrameSpec } from "../game/frame";
 import type { LineShape } from "../game/lineShape";
 import type { Loan } from "../game/loan";
@@ -18,6 +18,7 @@ import type { NetworkBuffers } from "../map/network";
 import type { CloudContext } from "./cloud";
 import type { DiagramGraph } from "../diagram/graph";
 import type { PackedOutlines } from "../map/coarseOutlines";
+import type { ValuePatch } from "./valuePatch";
 
 export type { DayLedger, HourLedger };
 
@@ -133,6 +134,8 @@ export type EditOp =
   | { op: "busSpacing"; line: number; spacing: number }
   /** T-2891: the player places a bus line's stops, from none between its ends; `busSpacing` leaves it */
   | { op: "busHand"; line: number }
+  /** T-3907: a bus line on BRT or off it; switching on a constructed line is paid at once */
+  | { op: "busBrt"; line: number; on: boolean }
   /** T-2891: a stop on a by-hand bus line put where the route is nearest (x, y), or (`on` false) the stop there taken out */
   | { op: "busHandStop"; line: number; x: number; y: number; on: boolean }
   /** T-2194: a planned ferry line over its ports in route order (a port's node, or a new one added
@@ -141,6 +144,8 @@ export type EditOp =
   | { op: "addFerryLine"; ports: FerryPortIn[]; route: number[]; name: string; colour: string }
   /** T-2194: a ferry line's ports and route drawn again (free; new ports on a constructed line are paid now) */
   | { op: "ferryRoute"; line: number; ports: FerryPortIn[]; route: number[] }
+  /** T-3892: a ferry line's boat size (0 Small, 1 Medium, 2 Large), with that size's dwell and turnaround */
+  | { op: "ferryBoat"; line: number; boat: 0 | 1 | 2 }
   | { op: "constructAll" }
   /** switch blueprint track and stations off or on (T-333): Construct and the quote skip what is off; one undoable edit */
   | { op: "blueprintOff"; edges: EdgeId[]; stations: NodeId[]; off: boolean }
@@ -208,6 +213,8 @@ export type EditOp =
   | { op: "lineFareDist"; line: number; dist: boolean }
   /** T-1791: put lines in a group (a line's group number, "new" for a fresh one, 0 for none), or name one ("" for its oldest line's name); one undoable edit, no service change */
   | { op: "lineGroup"; lines: number[]; group: number | "new" }
+  /** T-3423: put lines and groups straight in a group (0 for none); "new" makes one inside `parent` (0: at the top) */
+  | { op: "groupMembers"; lines: number[]; groups: number[]; group: number | "new"; parent: number }
   | { op: "groupName"; group: number; name: string }
   /** T-1813: a group's bullet text ("" for its name's) and colour (null for its lines') */
   | { op: "groupLook"; group: number; symbol: string; colour: string | null }
@@ -215,12 +222,16 @@ export type EditOp =
   | { op: "fares"; base?: number; perKm?: number; nodes?: [number, number][] }
   /** T-1277: a country's fare scale (ISO alpha-2), null for its income's again; not undoable, a setting */
   | { op: "fareScale"; country: string; scale: number | null }
+  /** T-3766: a city's fare scale (zone id), kept as a country's; null for its default again */
+  | { op: "fareCityScale"; city: string; scale: number | null }
+  /** T-3766: fares by city (each city its own multiple) or by country */
+  | { op: "fareByCity"; on: boolean }
   /** T-2679: the reference country, whose fares the Money tab's multiples are of; changes no fare */
   | { op: "fareRef"; country: string }
   /** T-1626: the fare multiplier on high-speed lines */
   | { op: "fareHsr"; mul: number }
-  /** T-2194: the fare multiplier on ferry lines */
-  | { op: "fareFerry"; mul: number }
+  /** T-2194: the fare multiplier on ferry lines; T-3892: of one boat size (game/fareCurve.ts `Boat`), Medium if none */
+  | { op: "fareFerry"; mul: number; boat?: 0 | 1 | 2 }
   | { op: "fareBus"; mul: number }
   /** T-3567: line `line`'s own fare multiplier, 0 to 3 (1: none); refused for a line that is gone */
   | { op: "fareLine"; line: number; mul: number }
@@ -262,8 +273,14 @@ export type ToClock =
       readFails?: number;
       /** T-3773: the next game opened panics after its decode, for checks (dev server, `?debug=1&loadPanic=1`); "late": the first load after the game has opened (T-3788) */
       loadPanic?: boolean | "late";
+      /** T-3869, checks (dev server, `?debug=1&saveRoom=`): the buffers a save asks for refused as a browser short of
+       * memory refuses them, "big" those of 1 MB or more, "all" every one, until the page has made room ("roomMade") */
+      saveRoom?: "big" | "all";
       /** T-2802: the least the WASM memory grows by, bytes (`heapStep` in deviceMemory.ts) */
       heapStep?: number }
+  /** T-3869: the page has replaced its demand workers for a save that found no memory (answering "room"), outside
+   * the queue */
+  | { kind: "roomMade" }
   /** T-2802: every zone's coarse outline, the page's parse of `packs/outlines.json` (null: unavailable), after init */
   | { kind: "outlines"; packed: PackedOutlines | null }
   /** T-1822: the Getting started card's progress, to keep in the save */
@@ -273,7 +290,10 @@ export type ToClock =
   /** T-1029: the client could not take a state as changes to the last: post the next whole */
   | { kind: "wholeState" }
   /** T-2159: the network diagram is shown (its graph follows every network state) or hidden */
-  | { kind: "diagram"; on: boolean }
+  | { kind: "diagram"; on: boolean; whole?: boolean }
+  /** T-3409: the schematic's chosen cities (zone ids, none for the whole network, kept in the save) and the station nodes
+   * and bus and ferry stops in them; `whole` on "diagram": while cities are chosen, the whole network's graphs too (a share) */
+  | { kind: "diagramCut"; cities: string[]; stations: number[]; stops: number[] }
   /** T-1196: the page reloads into another game: save the one in hand, keep `pending` (the game the
    * reloaded page opens, when not a slot) and let go of the slot; answered with "left" */
   | { kind: "leave"; pending?: PendingLoad }
@@ -470,6 +490,21 @@ export interface MoneyState {
    * port's upkeep a day (real US$) and its price US$M */
   fleetFerry: number;
   boatsNeeded: number;
+  /** T-3892: the above are Medium boats'; Small and Large boats owned and needed, their prices US$M and
+   * running costs a boat-km (real US$) */
+  fleetFerrySmall: number;
+  boatsNeededSmall: number;
+  fleetFerryLarge: number;
+  boatsNeededLarge: number;
+  smallBoatPrice: number;
+  runCostSmallBoatKm: number;
+  largeBoatPrice: number;
+  runCostLargeBoatKm: number;
+  /** T-3907: BRT's price a road-km US$M, its upkeep a road-km a day in place of a bus route's (real US$), and its
+   * buses' least moving speed, km/h */
+  brtRouteKm: number;
+  upkeepBrtKm: number;
+  brtKmh: number;
   /** T-2926: tram cars (20 m sections) owned and needed, and a car's price US$M */
   fleetTram: number;
   tramsNeeded: number;
@@ -482,7 +517,7 @@ export interface MoneyState {
   economy: number;
   /** T-1661, T-2022: the loan out, null for none */
   loan: Loan | null;
-  fares: { base: number; perKm: number; nodes: [number, number][]; scales?: Record<string, number>; baseline?: string; basis?: "usd"; income?: number; hsr?: number; ferry?: number; bus?: number; transfer?: number; lines?: Record<string, number>; zones?: FareArea[]; zoneNext?: number };
+  fares: { base: number; perKm: number; nodes: [number, number][]; scales?: Record<string, number>; byCity?: boolean; cityScales?: Record<string, number>; baseline?: string; basis?: "usd"; income?: number; hsr?: number; ferry?: number; ferrySmall?: number; ferryLarge?: number; bus?: number; transfer?: number; lines?: Record<string, number>; zones?: FareArea[]; zoneNext?: number };
   /** running cost per game hour in each demand period on weekdays (T-3542: five, `PERIODS`) */
   runningPerHour: number[];
   /** recent game days, oldest first; the last is today so far (as of the last whole hour; the
@@ -538,6 +573,8 @@ export interface ClockEdge {
   vminKmh: number;
   /** T-3405: the player's speed limit on it, km/h (`TrackApi::edge_limits`); 0 none */
   limit: number;
+  /** T-3893: the ramp length per level its ramps aim for, m (`TrackApi::edge_ramps`); 0 the default */
+  ramp: number;
   levelMin: number;
   levelMax: number;
 }
@@ -602,6 +639,8 @@ export interface ClockLine {
   /** T-1813: the group's bullet text and colour ("#rrggbb") set by hand, "" for none */
   groupSymbol: string;
   groupColour: string;
+  /** T-3423: the groups around `group`, nearest first */
+  outer: OuterGroup[];
   colour: string;
   ok: boolean;
   running: boolean;
@@ -664,6 +703,8 @@ export interface ClockLine {
   loopKind: number;
   /** T-2981: a loop that runs one way (`TrackApi::line_one_way`) */
   oneWay: boolean;
+  /** T-3835: set both ways, it runs one way as one-way track takes it round (`TrackApi::line_one_way_by_track`) */
+  oneWayByTrack: boolean;
   /** T-2987: the line's speed limit, km/h; 0 for none (`TrackApi::line_limit`) */
   limit: number;
   /** T-3758: its rides pay the distance fare where the game has fare zones (`TrackApi::line_fare_dist`); absent:
@@ -721,6 +762,11 @@ export interface ClockBus {
   spacing: number;
   /** T-2891: the player places the stops */
   hand: boolean;
+  /** T-3907: bus lanes along the whole route (BRT) */
+  brt: boolean;
+  /** T-3907: road metres in town for BRT (where a plain bus moves under BRT's floor), on BRT or not: what its
+   * lanes are paid and upkept over */
+  townM: number;
   /** T-2891: while `hand`, the stations the route can stop at, a stop or not */
   reach: { node: number; x: number; y: number; lng: number; lat: number }[];
   /** `route` and `street` as longitude, latitude pairs, flat */
@@ -738,6 +784,8 @@ export interface FerryRow {
   speeds: number[];
   /** per port in route order: its node and its landing, longitude and latitude, then its berth's */
   ports: { node: number; landing: [number, number]; berth: [number, number] }[];
+  /** T-3892: its boat size (0 Small, 1 Medium, 2 Large) */
+  boat: 0 | 1 | 2;
 }
 
 /** T-2194: a ferry line's port as the tool sends it: a port the network has, or a new one (its landing
@@ -780,6 +828,13 @@ export interface CapacityMarker {
 export interface RowsDelta<T> {
   ids: number[] | null;
   rows: T[];
+}
+
+/** T-3803: the money record (the last one posted is `base`) as its changes (workers/valuePatch.ts), null when none */
+export interface MoneyPatch {
+  base: number;
+  serial: number;
+  patch: ValuePatch | null;
 }
 
 export interface ClockState {
@@ -829,7 +884,13 @@ export interface ClockState {
   singles?: Float64Array;
   /** T-3297: the running side, false where trains keep left (`TrackApi.right_hand`); absent: right */
   rightHand?: boolean;
-  money: MoneyState;
+  /** absent as posted when `moneyPatch` carries it: the client puts it back before anything reads the state */
+  money?: MoneyState;
+  /** T-3803: the money record's serial (`money` posted whole), or its changes from the last one posted */
+  moneySerial?: number;
+  moneyPatch?: MoneyPatch;
+  /** `?patch=check`: the money record whole, for the client to compare its rebuilt one with */
+  checkMoney?: MoneyState;
   /** the renderer's buffers, built in the worker from the rest (T-063); the arrays are shared with
    * `render` */
   net?: NetworkBuffers;
@@ -853,11 +914,15 @@ export interface ClockState {
   anchor?: { lng: number; lat: number; version: number };
 }
 
+/** T-3844: what a paid edit paid for, so its money lands in that region when the world shows no change
+ * (a stop click's new trains: the line; an upgrade on a built station: the station; a rebuilt piece: the edge) */
+export type PaidFor = { line?: number; nodes?: number[]; edges?: number[] };
+
 export type FromClock =
   | { kind: "ready"; initMs: number; frame: FrameSpec }
   /** an edit's answer; `issues` are the track model's problem kinds (`TrackApi.issue_kinds`);
    * `ms`: the worker's time on the edit by step (T-229, for `?debug=1`); `node` after addBuilding: the building's id */
-  | { kind: "edited"; seq: number; ok: boolean; issues: string[]; charge: number; line?: number; node?: number; skipped?: number; ms?: Record<string, number>; early?: boolean; held?: Float32Array[] }
+  | { kind: "edited"; seq: number; ok: boolean; issues: string[]; charge: number; line?: number; node?: number; paid?: PaidFor; skipped?: number; ms?: Record<string, number>; early?: boolean; held?: Float32Array[] }
   | {
       kind: "preview";
       seq: number;
@@ -898,6 +963,8 @@ export type FromClock =
       noFlyover?: true;
       /** T-3168: each flyover crossing leg's slowest curve, as `verts` (x, y local units, radius, km/h) */
       legs?: Float64Array;
+      /** T-3027: each ramp that holds trains under the track's top speed: x, y (local units, its middle), km/h */
+      ramps?: Float32Array;
       /** the draw anchor version `verts`, `pts`, `arc` and `marks` are relative to (T-307) */
       anchor?: number;
       /** where the track makes a crossing or a flat junction (T-629): x, y (local units), then 1 for a
@@ -915,9 +982,10 @@ export type FromClock =
   | { kind: "snapshot"; snapshot: NetworkSnapshot }
   /** T-2159: the network diagram's graph, after a network state while the diagram is shown */
   /** one graph per region of the network (T-3448), each in a frame of its own */
-  | { kind: "diagramGraph"; graphs: DiagramGraph[]; ms: number }
+  /** T-3409: `cut`: the graphs are of the chosen cities alone; `whole`: the whole network's, when asked for */
+  | { kind: "diagramGraph"; graphs: DiagramGraph[]; ms: number; cut?: boolean; whole?: DiagramGraph[] }
   /** money changed without a network change (an hour settled, fares set) */
-  | { kind: "money"; money: MoneyState }
+  | { kind: "money"; money?: MoneyState; moneySerial?: number; moneyPatch?: MoneyPatch; checkMoney?: MoneyState }
   /** T-284: the cash and today's ledger as fares land and running costs drain, several times a wall
    * second while the clock runs; the rest of MoneyState comes with "money" when an hour turns */
   | { kind: "cash"; cash: number; today: MoneyState["ledger"][number]; hour: HourLedger; regions: RegionNow }
@@ -961,18 +1029,24 @@ export type FromClock =
   | { kind: "newHeadway"; seconds: import("./saveFile").NewHeadways }
   /** T-3420: the game's hidden lines (`SaveHeader.hidden`), sent with "opened" and after a new line takes a hidden one's id */
   | { kind: "hiddenLines"; lines: string[] }
+  /** T-3409: the game's schematic cities, on a load */
+  | { kind: "diagramCities"; cities: string[] }
   /** T-2395: the home of the game in hand (`SaveHeader.home`), sent with "opened" */
   | { kind: "home"; home: string | null }
-  /** the save file, for the player to keep */
-  | { kind: "exported"; bytes: Uint8Array; day: number; share?: true }
+  /** the save file, for the player to keep: `bytes` for a share, else in `parts` (T-3869: never one buffer); `error`
+   * (a message key) when it could not be made */
+  | { kind: "exported"; bytes?: Uint8Array; parts?: Uint8Array[]; day: number; share?: true; error?: string }
+  /** T-3869: a save found no memory: the page replaces its demand workers, giving back what they hold, and answers
+   * "roomMade" */
+  | { kind: "room" }
   /** a station placement's check (T-311): `issues` as an edit's; `cost` what it adds to the
    * blueprint, US$M */
   | { kind: "stationCheck"; seq: number; ok: boolean; issues: string[]; cost: number }
   /** a crossover preview (T-338): cost US$M, each diagonal's centre line (local x, y, height),
    * relative to draw anchor version `anchor` */
   | { kind: "crossoverCheck"; seq: number; ok: boolean; issues: string[]; cost: number; parts: Float32Array[]; anchor?: number }
-  /** a query's answer, in the track model's flat layout (pack metres) */
-  | { kind: "answer"; seq: number; data: Float64Array }
+  /** a query's answer, in the track model's flat layout (pack metres); `ms`, the worker's own time for it (T-3801) */
+  | { kind: "answer"; seq: number; data: Float64Array; ms?: number }
   /** an autosave was written (Date.now()), its size, and worker ms to encode and to write */
   | { kind: "saved"; at: number }
   /** the answer to a save by hand (T-1251): when it was written, or why not */
@@ -1018,7 +1092,7 @@ export interface NetworkSnapshot {
   stations: SnapshotStation[];
   lines: SnapshotLine[];
   /** The player's fare curve (game/fareCurve.ts): its first stretch as a base and rate, and its nodes. */
-  fare?: { base: number; perKm: number; nodes?: [number, number][]; scales?: Record<string, number>; zones?: FareArea[] };
+  fare?: { base: number; perKm: number; nodes?: [number, number][]; scales?: Record<string, number>; byCity?: boolean; cityScales?: Record<string, number>; zones?: FareArea[] };
   /** station pairs joined by a passage (T-1281), node ids; absent when there are none */
   passages?: [number, number][];
 }
@@ -1074,6 +1148,8 @@ export interface SnapshotLine {
   passFares?: number[][][];
   /** T-2195: a ferry line, whose fares are times the ferry multiplier; its stops are ports */
   ferry?: boolean;
+  /** T-3892: a ferry line's boat size when other than Medium (1), whose multiplier its fares take */
+  boat?: 0 | 2;
   /** T-2926: a line on tram track (`DemandApi.set_tram_lines`) */
   tram?: boolean;
   /** dwell at each stop, s, per run and period, in the run's own stop order (0 at both ends) */
@@ -1083,7 +1159,8 @@ export interface SnapshotLine {
   /** a circle line (T-798): its last stop is its first and trains ride on round, standing this
    * long there, s; absent otherwise */
   wrapS?: number;
-  /** cars per train (20 m each); a bus line's 0.5, its 80 riders at crush; a ferry line's 2 */
+  /** cars per train (20 m each); a bus line's 0.5, its 80 riders at crush; a ferry line's its boat's (1, 2 or 8,
+   * sim `ferry::Boat::cars`) */
   cars: number;
   /** T-1464, a bus line: per stop, the stretch of route whose homes walk to the route and ride
    * from that stop, x, y flat in the snapshot's frame (empty at a station) */

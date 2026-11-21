@@ -39,6 +39,10 @@ impl IntercityApi {
     pub fn set_back_stops(&mut self, back: &[u32]) {
         self.back_in = back.to_vec();
     }
+    /// `DemandApi::set_stairs` (T-3888).
+    pub fn set_stairs(&mut self, ferry_lines: &[u8], grade_stops: &[u8]) {
+        self.pier_in = (ferry_lines.to_vec(), grade_stops.to_vec());
+    }
     /// `DemandApi::set_bus` (T-1464), the points as longitude and latitude, as `set_network_ll`
     /// takes the stations.
     pub fn set_bus_ll(&mut self, catch_n: &[u32], catch_ll: &[f64]) {
@@ -330,16 +334,23 @@ impl IntercityApi {
     /// `{"US": 1.25, ...}` (countries left out: 1): the player's fare scale there over its income's.
     /// Each trip takes its origin's (a commute or outing its home's).
     pub fn set_fare_factors(&mut self, json: &str) -> Result<(), String> {
+        self.set_fare_factors_by(json, "{}")
+    }
+    /// T-3766: `set_fare_factors` with some places' own factors (`by_zone`, JSON by zone id, as
+    /// `{"nyc": 1.4}`) in place of their country's: a game whose fares are set by city.
+    pub fn set_fare_factors_by(&mut self, json: &str, by_zone: &str) -> Result<(), String> {
         let by: HashMap<String, f32> = serde_json::from_str(json).map_err(|e| e.to_string())?;
-        if by.values().any(|f| !(f.is_finite() && *f > 0.)) {
+        let own: HashMap<String, f32> = serde_json::from_str(by_zone).map_err(|e| e.to_string())?;
+        if by.values().chain(own.values()).any(|f| !(f.is_finite() && *f > 0.)) {
             return Err("invalid fare factor".into());
         }
         let m = &self.m;
         let of_country: Vec<f32> = m.countries.iter().map(|c| by.get(c).copied().unwrap_or(1.) - 1.).collect();
-        let fx: Vec<f32> = if of_country.iter().all(|&d| d == 0.) {
+        let of_place = |p: &Place| own.get(&p.zone).map_or_else(|| of_country.get(p.country as usize).copied().unwrap_or(0.), |f| f - 1.);
+        let fx: Vec<f32> = if of_country.iter().all(|&d| d == 0.) && own.is_empty() {
             vec![]
         } else {
-            m.zones.iter().map(|z| of_country[m.places[z.place].country as usize]).collect()
+            m.zones.iter().map(|z| of_place(&m.places[z.place])).collect()
         };
         if !same_bits(&fx, &self.zone_fx) {
             self.zone_fx = fx;
@@ -596,12 +607,14 @@ impl IntercityApi {
     /// and another place below `limit` (game/demand.ts `CorridorBook`): the longer trips, the commute
     /// legs, and the longer trips times the share flying in steps of 1 / 65534 (game/corridorShares.ts
     /// `shareCode`), each added in row order as the page did; then (T-3509) two numbers per place
-    /// below `limit` from its own row (between its own zones): the longer trips and the commute legs.
+    /// below `limit` from its own row (between its own zones): the longer trips and the commute legs;
+    /// then (T-2216) one per place below `limit`: the trips with no way but rail, before any rides
+    /// (the longer trips on rows with no car and no plane, the commute legs on rows with no car).
     /// Nothing the size of the table is made.
     pub fn table_summary(&self, limit: u32) -> Vec<f64> {
         let (m, cw, lim) = (&self.m, &*self.m.cw, limit as usize);
         let directs = Directs::of(&m.places);
-        let mut out = vec![0f64; 2 + 5 * lim];
+        let mut out = vec![0f64; 2 + 6 * lim];
         let (mut h, mut n) = (0x811c9dc5u32, 0usize);
         let mut word = |w: u32| h = (h ^ w).wrapping_mul(0x01000193);
         for (i, a, b, t) in self.table_rows() {
@@ -630,6 +643,12 @@ impl IntercityApi {
                 s[0] += t;
                 s[1] += c;
                 s[2] += f;
+            }
+            if car == 0. {
+                let none = if air > 0. { c } else { t + c };
+                for p in [a, b] {
+                    out[2 + 5 * lim + p] += none;
+                }
             }
         }
         out[0] = n as f64;

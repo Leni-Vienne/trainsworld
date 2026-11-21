@@ -31,8 +31,12 @@ export interface Fares {
   income?: number;
   /** T-1626: the fare multiplier on high-speed lines; absent for `HSR_FARE` */
   hsr?: number;
-  /** T-2194: the fare multiplier on ferry lines; absent for `FERRY_FARE` */
+  /** T-2194: the fare multiplier on ferry lines of Medium boats (T-3892; an older save's one multiplier
+   * for every ferry); absent for the default (`FERRY_FARES`) */
   ferry?: number;
+  /** T-3892: the same on ferry lines of Small and of Large boats */
+  ferrySmall?: number;
+  ferryLarge?: number;
   /** T-3028: the fare multiplier on bus lines; absent for `BUS_FARE` */
   bus?: number;
   /** T-3567: each line's own fare multiplier, by line id, on top of the kind's above; only lines set off 1,
@@ -46,6 +50,11 @@ export interface Fares {
    * it. Absent until a station is built, and in a save from before, whose own scales are then
    * rounded as they load (game/income.ts `tidyOwn`). */
   ref?: string;
+  /** T-3766: true when each city charges its own multiple (`cityScales`) and no country's applies; absent for
+   * country multiples (a save from before). Both lists are kept whichever applies. */
+  byCity?: boolean;
+  /** T-3766: the player's fare scales by city (zone id), kept as a country's are in `scales` */
+  cityScales?: Record<string, number>;
   /** T-3740: the fare areas (game/fareZones.ts), absent while there are none. The stations' zones are the track
    * model's (`StationData::fare`, area id << 8 | zone). */
   zones?: FareArea[];
@@ -96,17 +105,24 @@ export function tidyHsr(v: number): number {
   return Math.min(HSR_FARE_MAX, Math.max(0, Math.round(v * 100) / 100));
 }
 
-/** T-2194: a ferry line's fares are the curve's part above the base times this (notes/T-2177.md 3.7),
- * in demand and income alike (T-2195), as the high-speed one. */
-export const FERRY_FARE = 1;
-/** The ferry multiplier of `f`, or the default. */
-export function ferryFare(f: { ferry?: number } | undefined): number {
-  const v = f?.ferry;
-  return v !== undefined && Number.isFinite(v) && v >= 0 ? v : FERRY_FARE;
+/** T-2194: a ferry line's fares are the curve's part above the base times its boat's multiplier
+ * (notes/T-2177.md 3.7), in demand and income alike (T-2195), as the high-speed one. T-3892: one per boat
+ * (`BOATS`, sim `ferry::Boat`): Small 1.50 (fast craft charge more), Medium and Large 1.00. */
+export const FERRY_FARES: readonly number[] = [1.5, 1, 1];
+/** A ferry line's boat, as the sim codes it: 0 Small, 1 Medium, 2 Large. */
+export type Boat = 0 | 1 | 2;
+export const MEDIUM: Boat = 1;
+/** The `Fares` field holding each boat's multiplier. */
+export const FERRY_FARE_KEYS = ["ferrySmall", "ferry", "ferryLarge"] as const;
+/** The ferry multiplier of `f` for boat `boat` (Medium unless given), or the default. */
+export function ferryFare(f: { ferry?: number; ferrySmall?: number; ferryLarge?: number } | undefined, boat: Boat = MEDIUM): number {
+  const v = f?.[FERRY_FARE_KEYS[boat] ?? "ferry"];
+  return v !== undefined && Number.isFinite(v) && v >= 0 ? v : FERRY_FARES[boat] ?? 1;
 }
 /** T-3028: a bus line's fares are the curve's part above the base times this; 0 to `HSR_FARE_MAX`
- * as the others, so a long bus can be made as cheap as the player likes. */
-export const BUS_FARE = 1;
+ * as the others, so a long bus can be made as cheap as the player likes. 0.8 since T-3856 (Anita: "a bit
+ * lower"); a save that set the Bus row keeps its own. */
+export const BUS_FARE = 0.8;
 /** The bus multiplier of `f`, or the default. */
 export function busFare(f: { bus?: number } | undefined): number {
   const v = f?.bus;
@@ -125,8 +141,8 @@ export function ownLineFare(f: { lines?: Record<string, number> } | undefined, i
 }
 /** The multiplier a line's rides pay on the part of the fare above the base: a ferry's, a
  * bus's, a high-speed line's, else 1; times the line's own (T-3567). */
-export function lineFareMul(line: { id: string; fast?: boolean; ferry?: boolean; bus?: boolean }, f: { hsr?: number; ferry?: number; bus?: number; lines?: Record<string, number> } | undefined): number {
-  const kind = line.ferry ? ferryFare(f) : line.bus ? busFare(f) : line.fast ? hsrFare(f) : 1;
+export function lineFareMul(line: { id: string; fast?: boolean; ferry?: boolean; boat?: Boat; bus?: boolean }, f: { hsr?: number; ferry?: number; ferrySmall?: number; ferryLarge?: number; bus?: number; lines?: Record<string, number> } | undefined): number {
+  const kind = line.ferry ? ferryFare(f, line.boat) : line.bus ? busFare(f) : line.fast ? hsrFare(f) : 1;
   const own = ownLineFare(f, line.id);
   return own === 1 ? kind : kind * own;
 }

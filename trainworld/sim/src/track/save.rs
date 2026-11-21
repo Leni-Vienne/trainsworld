@@ -5,7 +5,7 @@
 
 use super::frame::FrameKind;
 use super::geom::Pi;
-use super::net::{EdgeData, GroupLook, LineData, Network, NodeData, StationData, Weekend, DAY_UNKNOWN};
+use super::net::{EdgeData, GroupLook, LineData, OuterGroup, Network, NodeData, StationData, Weekend, DAY_UNKNOWN};
 use super::params::*;
 use super::twin::Twin;
 
@@ -77,6 +77,21 @@ use super::twin::Twin;
 /// A trailing `LFD1` block (T-3758) gives the lines that pay the distance fare in a game with fare
 /// zones (`LineData::fare_dist`): count, then line indexes; without it every line pays zone fares.
 /// Level 29 (T-3767): bus and ferry lines set their rows and hours as rail lines do (`OLD_BUS_ROWS`).
+/// A trailing `LGN1` block (T-3423, level 30) gives the line groups that sit in another group: count,
+/// then per such group its number, the number of the group around it and that one's name, bullet text
+/// and colour (as `LGL1`'s); without it no group sits in another.
+/// A trailing `LRA1` block (T-3027, level 31) gives the pieces of track drawn since T-3027 with their ramp per
+/// level (`EdgeData::ramp`): count, then edge index and metres; without it every piece is older track.
+/// A trailing `LWP1` block (T-3735, level 32), written where `LWE1` gives the weekends' rates, gives
+/// where the lines running other rates on weekends leave then (`Network::line_phase_rest`,
+/// `line_split_rest`) and their weekend pacing (`line_pace_rest`): a mask of the slots worked out (a
+/// bit per slot), then the lines whose differ from their weekdays' (count, then index and per slot of
+/// the mask its phase, split and pace as f32 bits); every other line's are its weekdays'. Without it a
+/// load places the weekends again.
+/// A trailing `LFB1` block (T-3892, level 33) gives the ferry lines whose boat is other than Medium:
+/// count, then line index and `ferry::Boat::code`; without it every ferry line's boats are Medium.
+/// A trailing `LBR1` block (T-3907, level 34) gives the bus lines on BRT (`BusRoute::brt`): count, then line
+/// indexes; without it no line is.
 const MAGIC: &[u8; 4] = b"TWT4";
 /// TWT5 (T-125) is TWT4 byte for byte except that the metres are in the Lambert conformal world
 /// frame (`frame.rs`). TWT4 and older are always the legacy equirectangular frame, and a network
@@ -89,12 +104,12 @@ const MAGIC_TWT6: &[u8; 4] = b"TWT6";
 
 /// T-1826: the trailing blocks this build reads, in the order they are written. A block it does not
 /// know stops the decoder, which then reports the bytes left over (`decode_read`).
-pub const BLOCKS: [&[u8; 4]; 33] = [b"LUI1", b"LNK1", b"LAU1", b"LHS1", b"LBS1", b"LBS2", b"LRT1", b"LGR1", b"LGL1", b"LOR1", b"LPH1", b"LSP1", b"LFR1", b"LFR2", b"LFR3", b"BLD1", b"LBD1", b"LBP1", b"LHO1", b"LMN1", b"LBH1", b"LOW1", b"LSL1", b"LPC1", b"LTW1", b"LPS1", b"LWE1", b"LOS1", b"LPD1", b"LHR1", b"LFZ1", b"LSN1", b"LFD1"];
+pub const BLOCKS: [&[u8; 4]; 38] = [b"LUI1", b"LNK1", b"LAU1", b"LHS1", b"LBS1", b"LBS2", b"LRT1", b"LGR1", b"LGL1", b"LOR1", b"LPH1", b"LSP1", b"LFR1", b"LFR2", b"LFR3", b"BLD1", b"LBD1", b"LBP1", b"LHO1", b"LMN1", b"LBH1", b"LOW1", b"LSL1", b"LPC1", b"LTW1", b"LPS1", b"LWE1", b"LOS1", b"LPD1", b"LHR1", b"LFZ1", b"LSN1", b"LFD1", b"LGN1", b"LRA1", b"LWP1", b"LFB1", b"LBR1"];
 /// T-1826: the save level this build writes into the game header (`level`) and reads up to. Raised
 /// with every new block, every new field inside a header field (a new top-level header field is seen
 /// as unknown on its own) and every new meaning of existing bytes, so an older build knows a newer
 /// save even when it has nothing left over. Saves from before it have none, read as 0.
-pub const LEVEL: u32 = 29;
+pub const LEVEL: u32 = 34;
 /// T-3759: the last level from before stations could be unbound from their complex's name; a typed
 /// station there showed its own name, so loading one makes such a station unbound (the app's pass).
 pub const OLD_BOUND_NAMES: u32 = 26;
@@ -717,6 +732,73 @@ pub fn encode(net: &Network) -> Vec<u8> {
         w.u(dist.len() as u64);
         for i in dist { w.u(i as u64); }
     }
+    // T-3423: after LFD1, only where a group sits in another: count, then per such group its number,
+    // the number of the group around it and that group's name, bullet text and colour (as LGL1's)
+    let mut nested: Vec<(u32, &OuterGroup)> = vec![];
+    for &l in &lines {
+        let i = l as usize;
+        let mut inner = net.line_group[i];
+        for o in &net.line_group_outer[i] {
+            if !nested.iter().any(|x| x.0 == inner) { nested.push((inner, o)); }
+            inner = o.group;
+        }
+    }
+    if !nested.is_empty() {
+        w.0.extend_from_slice(b"LGN1");
+        w.u(nested.len() as u64);
+        for (g, o) in nested {
+            w.u(g as u64);
+            w.u(o.group as u64);
+            w.s(&o.name);
+            w.s(&o.look.symbol);
+            w.u(o.look.colour.map_or(0, |c| c as u64 + 1));
+        }
+    }
+    let ramped: Vec<(usize, u16)> = edges.iter().enumerate().filter(|(_, &e)| net.edge_ramp[e as usize] > 0).map(|(i, &e)| (i, net.edge_ramp[e as usize])).collect();
+    if !ramped.is_empty() {
+        w.0.extend_from_slice(b"LRA1");
+        w.u(ramped.len() as u64);
+        for (i, v) in ramped {
+            w.u(i as u64);
+            w.u(v as u64);
+        }
+    }
+    // T-3735: after LRA1, only with LWE1's weekend rates
+    if net.rates_settled && net.rest_solved && !net.line_phase_rest.is_empty() {
+        w.0.extend_from_slice(b"LWP1");
+        let slots: Vec<usize> = net.slots().collect();
+        w.u(slots.iter().map(|&s| 1u64 << s).sum());
+        let rest = |l: u32| [net.line_phase_rest_of(l), net.line_split_rest_of(l), net.line_pace_rest_of(l)];
+        let week = |l: u32| [net.line_phase_of(l), net.line_split_of(l), net.line_pace_of(l)];
+        let other: Vec<(usize, u32)> = lines.iter().enumerate().filter(|(_, &l)| {
+            let (a, b) = (rest(l), week(l));
+            slots.iter().any(|&k| (0..3).any(|j| a[j][k].to_bits() != b[j][k].to_bits()))
+        }).map(|(i, &l)| (i, l)).collect();
+        w.u(other.len() as u64);
+        for (i, l) in other {
+            w.u(i as u64);
+            let a = rest(l);
+            for &k in &slots { for x in &a { w.u(x[k].to_bits() as u64); } }
+        }
+    }
+    // T-3892: after LWP1, only where some ferry line's boat is other than Medium: count, then line
+    // index and `ferry::Boat::code`
+    let boats: Vec<(usize, u8)> = lines.iter().enumerate().filter_map(|(i, &l)| net.line_ferry[l as usize].as_ref().filter(|r| r.boat != super::ferry::Boat::Medium).map(|r| (i, r.boat.code()))).collect();
+    if !boats.is_empty() {
+        w.0.extend_from_slice(b"LFB1");
+        w.u(boats.len() as u64);
+        for (i, b) in boats {
+            w.u(i as u64);
+            w.u(b as u64);
+        }
+    }
+    // T-3907: after LFB1, only where some bus line is on BRT: count, then line indexes
+    let brt: Vec<usize> = lines.iter().enumerate().filter(|(_, &l)| net.is_brt(l)).map(|(i, _)| i).collect();
+    if !brt.is_empty() {
+        w.0.extend_from_slice(b"LBR1");
+        w.u(brt.len() as u64);
+        for i in brt { w.u(i as u64); }
+    }
     w.0
 }
 
@@ -895,7 +977,7 @@ fn decode_read_at(bytes: &[u8], level: u32) -> Result<(Network, usize), String> 
                 thru.push(Pi { x, y, radius: 0.0, level: r.i()? as i8 });
             }
         }
-        net.set_edge(id, Some(EdgeData { a: a as u32, b: b as u32, tracks, pis, built, off, thru, crossover, kind, sep, day: 0, oneway, join: [(tb >> 13 & 3) as u8, (tb >> 15 & 3) as u8], limit: 0 })).map_err(|e| format!("{e:?}"))?;
+        net.set_edge(id, Some(EdgeData { a: a as u32, b: b as u32, tracks, pis, built, off, thru, crossover, kind, sep, day: 0, oneway, join: [(tb >> 13 & 3) as u8, (tb >> 15 & 3) as u8], limit: 0, ramp: 0 })).map_err(|e| format!("{e:?}"))?;
     }
     let n_lines = r.u()? as usize;
     let (mut dead_node, mut dead_edge) = (None, None);
@@ -925,7 +1007,7 @@ fn decode_read_at(bytes: &[u8], level: u32) -> Result<(Network, usize), String> 
             let e = if (e as usize) < n_edges { e } else { *dead_edge.get_or_insert_with(|| net.alloc_edge()) };
             path.push(e << 1 | (v & 1) as u32);
         }
-        net.set_line(id, Some(LineData { rows: 0, x: Default::default(), symbol: String::new(), trains, auto: None, name, colour, stops, path, tph, dwell_s, turnaround_s, cars, fast: false, bus: None, ferry: None, group: 0, group_name: String::new(), group_look: Default::default(), day: 0, hand: false, one_way: false, limit: 0, twin: Default::default(), weekend: Default::default(), ones: vec![], fare_dist: false })).map_err(|e| format!("{e:?}"))?;
+        net.set_line(id, Some(LineData { rows: 0, x: Default::default(), symbol: String::new(), trains, auto: None, name, colour, stops, path, tph, dwell_s, turnaround_s, cars, fast: false, bus: None, ferry: None, group: 0, group_name: String::new(), group_look: Default::default(), outer: vec![], day: 0, hand: false, one_way: false, limit: 0, twin: Default::default(), weekend: Default::default(), ones: vec![], fare_dist: false })).map_err(|e| format!("{e:?}"))?;
     }
     net.next_line_number = n_lines as u32 + 1;
     if r.0.get(r.1..r.1 + 4) == Some(b"LUI1") {
@@ -1295,6 +1377,72 @@ fn decode_read_at(bytes: &[u8], level: u32) -> Result<(Network, usize), String> 
             if i < n_lines { net.line_fare_dist[i] = true; }
         }
     }
+    if r.0.get(r.1..r.1 + 4) == Some(b"LGN1") {
+        r.1 += 4;
+        let mut up: Vec<(u32, OuterGroup)> = vec![];
+        for _ in 0..r.u()? {
+            let (g, group, name, symbol, c) = (r.u()? as u32, r.u()? as u32, r.s()?, r.s()?, r.u()?);
+            let look = GroupLook { symbol, colour: c.checked_sub(1).map(|c| (c as u32) & 0xff_ffff) };
+            if g != 0 && group != 0 && !up.iter().any(|x| x.0 == g) { up.push((g, OuterGroup { group, name, look })); }
+        }
+        for i in 0..n_lines {
+            let mut at = net.line_group[i];
+            let mut chain: Vec<OuterGroup> = vec![];
+            // a parent missing or met twice ends the chain
+            while let Some((_, o)) = up.iter().find(|x| x.0 == at && at != 0) {
+                if o.group == net.line_group[i] || chain.iter().any(|c| c.group == o.group) { break; }
+                chain.push(o.clone());
+                at = o.group;
+            }
+            net.line_group_outer[i] = chain;
+        }
+    }
+    if r.0.get(r.1..r.1 + 4) == Some(b"LRA1") {
+        r.1 += 4;
+        for _ in 0..r.u()? {
+            let i = r.u()? as usize;
+            let v = r.u()?.min(u16::MAX as u64) as u16;
+            if i < n_edges {
+                if let Some(d) = net.edge_data(i as u32) {
+                    net.set_edge(i as u32, Some(EdgeData { ramp: v, ..d })).map_err(|e| format!("{e:?}"))?;
+                }
+            }
+        }
+    }
+    if r.0.get(r.1..r.1 + 4) == Some(b"LWP1") {
+        r.1 += 4;
+        let mask = r.u()?;
+        let slots: Vec<usize> = (0..64).filter(|&k| mask >> k & 1 == 1).collect();
+        // every line's as on weekdays bar those listed
+        net.line_phase_rest = (0..n_lines as u32).map(|l| net.line_phase_of(l)).collect();
+        net.line_split_rest = (0..n_lines as u32).map(|l| net.line_split_of(l)).collect();
+        net.line_pace_rest = (0..n_lines as u32).map(|l| net.line_pace_of(l)).collect();
+        for _ in 0..r.u()? {
+            let i = r.u()? as usize;
+            for &k in &slots {
+                let (p, s, c) = (f32::from_bits(r.u()? as u32), f32::from_bits(r.u()? as u32), f32::from_bits(r.u()? as u32));
+                if i < n_lines && k < SLOTS && net.slot_worked(k) {
+                    (net.line_phase_rest[i][k], net.line_split_rest[i][k], net.line_pace_rest[i][k]) = (p, s, c);
+                }
+            }
+        }
+    }
+    if r.0.get(r.1..r.1 + 4) == Some(b"LFB1") {
+        r.1 += 4;
+        for _ in 0..r.u()? {
+            let (i, b) = (r.u()? as usize, super::ferry::Boat::from_code(r.u()?));
+            if let (Some(Some(route)), Some(b)) = (net.line_ferry.get_mut(i).filter(|_| i < n_lines), b) {
+                route.boat = b;
+            }
+        }
+    }
+    if r.0.get(r.1..r.1 + 4) == Some(b"LBR1") {
+        r.1 += 4;
+        for _ in 0..r.u()? {
+            let i = r.u()? as usize;
+            if let Some(Some(route)) = net.line_bus.get_mut(i).filter(|_| i < n_lines) { route.brt = true; }
+        }
+    }
     for l in manual {
         fold_manual(&mut net, l);
     }
@@ -1400,9 +1548,9 @@ mod tests {
             net.set_station(n, Some(StationData { platform: 2, name: format!("S{x}"), named: false, built: true, off: false, upgrades: 0, berth: None, day: 0, one: 0, fare: 0, own: String::new() })).unwrap();
         }
         let e = net.alloc_edge();
-        net.set_edge(e, Some(EdgeData { a: 0, b: 1, tracks: 2, pis: vec![], built: true, off: false, thru: vec![], crossover: false, kind: TrackKind::Regular, sep: false, day: 0, oneway: 0, join: [0; 2], limit: 0 })).unwrap();
+        net.set_edge(e, Some(EdgeData { a: 0, b: 1, tracks: 2, pis: vec![], built: true, off: false, thru: vec![], crossover: false, kind: TrackKind::Regular, sep: false, day: 0, oneway: 0, join: [0; 2], limit: 0, ramp: 0 })).unwrap();
         let l = net.alloc_line();
-        net.set_line(l, Some(LineData { rows: 0, x: Default::default(), symbol: String::new(), trains: Some([2, 2, 1]), auto: None, name: "A".into(), colour: 0xff0000, stops: vec![0, 1], path: vec![0], tph: [0.0; 3], dwell_s: 30.0, turnaround_s: 120.0, cars: 4, fast: false, bus: None, ferry: None, group: 0, group_name: String::new(), group_look: Default::default(), day: 0, hand: false, one_way: false, limit: 0, twin: Default::default(), weekend: Default::default(), ones: vec![], fare_dist: false })).unwrap();
+        net.set_line(l, Some(LineData { rows: 0, x: Default::default(), symbol: String::new(), trains: Some([2, 2, 1]), auto: None, name: "A".into(), colour: 0xff0000, stops: vec![0, 1], path: vec![0], tph: [0.0; 3], dwell_s: 30.0, turnaround_s: 120.0, cars: 4, fast: false, bus: None, ferry: None, group: 0, group_name: String::new(), group_look: Default::default(), outer: vec![], day: 0, hand: false, one_way: false, limit: 0, twin: Default::default(), weekend: Default::default(), ones: vec![], fare_dist: false })).unwrap();
         encode(&net)
     }
 
@@ -1540,7 +1688,7 @@ mod tests {
         for tag in &written {
             assert!(BLOCKS.iter().any(|b| &b[..] == tag.as_bytes()), "block {tag} is written but not in BLOCKS");
         }
-        assert_eq!((LEVEL, BLOCKS.len()), (29, 33), "a new block raises LEVEL: raise it, then update this pin");
+        assert_eq!((LEVEL, BLOCKS.len()), (34, 38), "a new block raises LEVEL: raise it, then update this pin");
     }
 
     /// T-2217: buildings come back as they were, in their order; a network without them encodes as

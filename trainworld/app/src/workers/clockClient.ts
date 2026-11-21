@@ -15,6 +15,7 @@ import { setLineShapeSink, takeLineShapes } from "../game/lineShapeState";
 import { setNewHeadwaySink, takeNewHeadway } from "../game/newHeadway";
 import { bindNewStations } from "../game/stationBinding";
 import { setHiddenLinesSink, takeHiddenLines } from "../game/lineVisibility";
+import { takeDiagramCities } from "../game/diagramCities";
 import { hiddenZones, setGameStart } from "../game/realms";
 import { home } from "../game/home";
 import { fitView, holdForGameLoad, loadCannotFinish, markAlive } from "../game/loading";
@@ -29,10 +30,11 @@ import { accountVersion, packArrivals, packRiders } from "../game/boarding";
 import { ask, designSpeed, guideFinished, lineDraft, marketOff, selection, tool } from "../game/ui";
 import { afterStopEdits, flipSites, rightHand, say, setEditSink, stopsQueued, world, worldIsRows } from "../game/world";
 import type { LineInput, LineStats, RowFigs, StationInput, TrackEdge, TrackNode, WorldView } from "../game/types";
-import type { ClockLine, ClockState, EditOp, FromClock, NetworkSnapshot, PiInput, RouteAsk, StationAt, ToClock } from "./protocol";
+import type { ClockLine, ClockState, EditOp, FromClock, MoneyPatch, MoneyState, NetworkSnapshot, PaidFor, PiInput, RouteAsk, StationAt, ToClock } from "./protocol";
+import { applyPatch } from "./valuePatch";
 import { anchorVersion } from "../map/anchorVersion";
 import { mergeNet, type NetworkBuffers } from "../map/network";
-import { bandTry, perfOff } from "../perfFlags";
+import { bandTry } from "../perfFlags";
 import { anchor, anchorWanted, EARTH_C, HOME_ANCHOR, makeAnchor, setAnchor, type Anchor } from "../map/geo";
 import { loadFailText } from "../game/loadText";
 import { noteOpenFailure, openedFine } from "../game/openFailures";
@@ -75,6 +77,19 @@ const STOP_READS = new Set(["stopTiers", "stopGap", "insertStop", "passedStation
  * click's network as long): the panels ask a dozen after each world, 0.2 to 0.7 s of the worker's on New York's real
  * save, and the next click waited behind them */
 const STOP_HOLD_MS = 500;
+type ClockQ = Extract<ToClock, { kind: "query" }>["q"];
+/** T-3801: the panels' reads, asked again as the clock, the network or the account moves (docs/architecture.md
+ * "Workers"). The worker answers in turn, so an edit waits behind every one sent before it: they wait on the page
+ * instead, one in the worker at a time, and after each answer the next waits POLL_REST times the worker's own time
+ * for it (at most POLL_REST_MAX_MS), so they take at most a third of the worker. A question the page has never had
+ * answered (a panel just opened) goes at once. */
+const POLL_READS = new Set<ClockQ["what"]>(["today", "linesPeriods", "linePeriods", "lineAccount", "lineHeld", "lineDelays", "lineWaits", "lineMarks",
+  "lineTrips", "stationDeps", "lineRelated", "linePairs", "passingSpots", "upgradeCosts", "upgradeCost", "tracksCost", "platformCost", "junction",
+  "flyover", "blueprintQuote", "blueprintPieces", "lineCost"]);
+const POLL_REST = 2;
+const POLL_REST_MAX_MS = 3000;
+/** a read unanswered this long, ms, no longer counts as queued (a worker that never answers holds no read for ever) */
+const POLL_LOST_MS = 10000;
 export function manageSaveSlot(action: Extract<ToClock, { kind: "saveSlot" }>["action"], key?: string, name?: string) {
   // T-1196: a game opened or restored reloads the page into it, T-1197: if it fits
   if (action === "open" && key && key !== saveSlotsState.peek().active) return void ifItFits({ key }, () => switchGame({ slot: key }));
@@ -147,6 +162,11 @@ const roadsListeners: (() => void)[] = [];
 /** T-1929: call `f` whenever road tiles land in the track model (a ghost priced before them is out of date). */
 export function onRoadsLanded(f: () => void) {
   roadsListeners.push(f);
+}
+let roomSink: (() => void) | null = null;
+/** T-3869: call `f` when a save finds no memory (the demand workers are replaced, giving theirs back). */
+export function onSaveRoom(f: () => void) {
+  roomSink = f;
 }
 let netAheadSink: ((key: string) => void) | null = null;
 /** T-1539: call `f` with a loading save's `saveNetKey`, before its first snapshot. */
@@ -256,7 +276,7 @@ function edgesOf(s: ClockState): TrackEdge[] {
     const v = j >= 0 ? lastViews[j] : undefined;
     if (v && sameObjects(v.lines, ls)) return v;
     return {
-      id: e.id, a: e.a, b: e.b, tracks: e.tracks, built: e.built, off: e.off, hsr: e.hsr, kind: e.kind || undefined, oneWay: e.oneWay || undefined, join: e.join || undefined, setWay: e.setWay || undefined, autoWay: e.autoWay || undefined, crossover: e.crossover, partner: e.partner, lengthM: e.lengthM, cost: e.cost * 1e6, vminKmh: e.vminKmh, limit: e.limit || undefined,
+      id: e.id, a: e.a, b: e.b, tracks: e.tracks, built: e.built, off: e.off, hsr: e.hsr, kind: e.kind || undefined, oneWay: e.oneWay || undefined, join: e.join || undefined, setWay: e.setWay || undefined, autoWay: e.autoWay || undefined, crossover: e.crossover, partner: e.partner, lengthM: e.lengthM, cost: e.cost * 1e6, vminKmh: e.vminKmh, limit: e.limit || undefined, ramp: e.ramp || undefined,
       levelMin: e.levelMin as any, levelMax: e.levelMax as any, lines: ls === none ? [] : ls,
     };
   });
@@ -287,7 +307,7 @@ function toWorld(s: ClockState): WorldView {
     if (!v) lineViews.set(l, v = {
       id: String(l.id), num: l.id, letter: l.letter || letterOf(l.name), symbol: l.letter, name: l.name, colour: l.colour, stops: l.stops.map(String),
       ...(l.planStops ? { planStops: l.planStops.map(String), stopStart: l.stopStart ?? 0 } : {}),
-      ...(l.group ? { group: l.group, groupName: l.groupName, groupSymbol: l.groupSymbol, groupColour: l.groupColour } : {}),
+      ...(l.group ? { group: l.group, groupName: l.groupName, groupSymbol: l.groupSymbol, groupColour: l.groupColour, ...(l.outer.length ? { outer: l.outer } : {}) } : {}),
       tph: { high: l.tph[0], medium: l.tph[1], low: l.tph[2] },
       tphP: l.tphP,
       ...(l.twinOf !== undefined ? { twinOf: String(l.twinOf) } : {}),
@@ -337,6 +357,7 @@ function toWorld(s: ClockState): WorldView {
       hand: l.hand,
       loop: l.loopKind === 1 ? "circle" : l.loopKind === 2 ? "balloon" : null, // i18n-ignore
       oneWay: l.oneWay,
+      ...(l.oneWayByTrack ? { oneWayByTrack: true as const } : {}),
       limit: l.limit,
       ...(l.fareDist ? { fareDist: true as const } : {}),
       ...(l.weekend ? { weekend: l.weekend } : {}),
@@ -423,11 +444,12 @@ export function leaveViewed(): Promise<boolean> {
     ask.value = { text: t("clockClient.leaveView", { name: v.name }), yes: t("clockClient.leaveViewYes"), no: t("clockClient.leaveViewNo"), run: () => done(true), stay: () => done(false) };
   });
 }
-/** A save's bytes downloaded as "trainsworld-<name>-day-<day>.save". */
-function downloadSave(bytes: Uint8Array, name: string, day: number, slot?: string) {
+/** A save's bytes, in parts (T-3869: put in the file one by one, never joined here), downloaded as
+ * "trainsworld-<name>-day-<day>.save". */
+function downloadSave(parts: Uint8Array[], name: string, day: number, slot?: string) {
   markDownloaded(slot); // T-1832: the "saved in this browser only" card has nothing more to say
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([bytes as BlobPart], { type: "application/octet-stream" }));
+  a.href = URL.createObjectURL(new Blob(parts as BlobPart[], { type: "application/octet-stream" }));
   const named = name.toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "")
     .replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "").replace(/-+/g, "-").replace(/^-|-$/g, "");
   a.download = `trainsworld-${named || "game"}-day-${day}.save`; // i18n-ignore
@@ -439,7 +461,7 @@ function downloadSave(bytes: Uint8Array, name: string, day: number, slot?: strin
 export async function exportSlot(slot: SaveSlot): Promise<boolean> {
   const stored = await readStored(slot.key).catch(() => null);
   if (!stored) return false;
-  downloadSave(stored.bytes, slot.name, stored.day, slot.key);
+  downloadSave([stored.bytes], slot.name, stored.day, slot.key);
   return true;
 }
 /** Load a save file the player picked, into a new slot named after the file (T-743).
@@ -543,8 +565,8 @@ export function postAchievements(got: Record<string, Omit<import("./saveFile").A
   current?.post({ kind: "achieve", got });
 }
 /** Ask the clock worker an inspector question (T-031); null before the worker is there. */
-export function queryClock(q: Extract<ToClock, { kind: "query" }>["q"]): Promise<Float64Array | null> {
-  return current ? current.query(q) : Promise.resolve(null);
+export function queryClock(q: Extract<ToClock, { kind: "query" }>["q"], soon = false): Promise<Float64Array | null> {
+  return current ? current.query(q, soon) : Promise.resolve(null);
 }
 
 /** T-3297: every train, tram and bus to the other side; the sites the flip fixed and left (`ToClock` "flipSide"). */
@@ -640,7 +662,8 @@ export class ClockClient {
   /** the renderer's hooks, set by main.ts */
   onState: (s: ClockState) => void = () => {};
   /** T-2159: the network diagram's graph, while the diagram is shown (diagram/view.ts) */
-  onDiagram: (graphs: DiagramGraph[]) => void = () => {};
+  /** T-3409: `cut`: the graphs are of the chosen cities alone; `whole`: the whole network's too, when a share asked */
+  onDiagram: (graphs: DiagramGraph[], cut: boolean, whole?: DiagramGraph[]) => void = () => {};
   /** `board`: the boarding account's hour (T-164, game/boarding.ts), once demand has riders */
   onTrips: (epoch: number, version: number, trips: Float32Array, board?: Float32Array, ends?: Float32Array, nexts?: Float32Array, bays?: Float32Array) => void = () => {};
   /** the boarding account's last hours: ms in the worker for the hour, lines worked out again
@@ -711,9 +734,11 @@ export class ClockClient {
     const backupMs = Number(q.get("backupMs")) || undefined;
     const readFails = q.get("debug") === "1" ? Number(q.get("readFails")) || undefined : undefined;
     const loadPanic = q.get("debug") !== "1" ? undefined : q.get("loadPanic") === "1" ? true : q.get("loadPanic") === "late" ? "late" as const : undefined;
+    const room = q.get("debug") === "1" ? q.get("saveRoom") : null;
+    const saveRoom = room === "big" || room === "all" ? room : undefined;
     this.patchMode = q.get("patch") ?? "1";
     // (first, before any message posted ahead of the start)
-    this.waiting.unshift([{ kind: "init", pack: dataUrl(this.cityId), terrain: TERRAIN_BASE, fresh, testPage: this.testPage, slot, newSlot: choice.newSlot, backupMs, game: choice.game, pending: choice.pending, patch: this.patchMode, guide: !guideFinished.peek(), bandMode: bandTry(), readFails, loadPanic, heapStep: heapStep() } satisfies ToClock, choice.game?.real ? [choice.game.real] : []]);
+    this.waiting.unshift([{ kind: "init", pack: dataUrl(this.cityId), terrain: TERRAIN_BASE, fresh, testPage: this.testPage, slot, newSlot: choice.newSlot, backupMs, game: choice.game, pending: choice.pending, patch: this.patchMode, guide: !guideFinished.peek(), bandMode: bandTry(), readFails, loadPanic, saveRoom, heapStep: heapStep() } satisfies ToClock, choice.game?.real ? [choice.game.real] : []]);
     // T-2802: the page's parse of the outlines, copied, in place of the worker's own fetch and parse
     void packedOutlines().then((packed) => this.post({ kind: "outlines", packed }));
   }
@@ -789,7 +814,7 @@ export class ClockClient {
       for (const id of [...settledIncome.keys()]) if (!live.has(id)) settledIncome.delete(id);
       for (const id of live) {
         const was = settledIncome.get(id);
-        if (!pend.has(id) || !was || perfOff("settledHold")) { settledIncome.set(id, days.map((i) => ({ perHour: i.lines.get(id)?.perHour ?? [], rides: i.lines.get(id)?.rides ?? [] }))); continue; }
+        if (!pend.has(id) || !was) { settledIncome.set(id, days.map((i) => ({ perHour: i.lines.get(id)?.perHour ?? [], rides: i.lines.get(id)?.rides ?? [] }))); continue; }
         days.forEach((i, d) => {
           const cur = i.lines.get(id), old = was[d];
           if (!cur || !old) return;
@@ -984,6 +1009,27 @@ export class ClockClient {
   private lastNet: NetworkBuffers | null = null;
   private lastService: { phases: Float32Array; meta: Float32Array } | null = null;
 
+  /** T-3803: the last money record posted (as a state's or a "money" message's), and its serial */
+  private money: { serial: number; m: MoneyState } | null = null;
+
+  /** The money record back in `money` from the last one and a patch (T-3803); false when the patch was made
+   * against a record this page does not hold (the worker is then asked for a whole state). */
+  private takeMoney(x: { money?: MoneyState; moneySerial?: number; moneyPatch?: MoneyPatch; checkMoney?: MoneyState }): boolean {
+    const p = x.moneyPatch;
+    if (p) {
+      if (this.money?.serial !== p.base) return false;
+      // (a new record each time, as when it came whole)
+      x.money = p.patch ? applyPatch(this.money.m, p.patch) : { ...this.money.m };
+      this.money = { serial: p.serial, m: x.money };
+      delete x.moneyPatch;
+    } else if (x.money) this.money = { serial: x.moneySerial ?? NaN, m: x.money };
+    if (x.checkMoney) {
+      if (JSON.stringify(x.money) !== JSON.stringify(x.checkMoney)) console.error("T-3803 check: the money record rebuilt from changes differs from the whole one");
+      delete x.checkMoney;
+    }
+    return !!x.money;
+  }
+
   /** A state's edges, nodes and lines back in full from the last ones and its `delta` (T-1029);
    * false when they cannot be (the worker is then asked for a whole state). */
   private takeRows(st: ClockState): boolean {
@@ -1089,7 +1135,7 @@ export class ClockClient {
   }
 
   /** T-1407: a paying edit answered ahead of its state, whose money's split is read off that state */
-  private earlyShares: { seq: number; line?: number } | null = null;
+  private earlyShares: { seq: number; line?: number; paid?: PaidFor } | null = null;
 
   private takeState(msg: Extract<FromClock, { kind: "state" }>) {
     const st = msg.state, sb = this.stateBusy;
@@ -1109,14 +1155,14 @@ export class ClockClient {
     const moved = a !== anchor();
     if (moved) setAnchor(a);
     if (msg.state.net) msg.state.net.anchor = a;
-    setMoneyState(msg.state.money);
+    setMoneyState(msg.state.money!);
     this.worldBefore = world.value;
     worldIsRows.value = !!msg.state.rows;
     if (msg.state.rightHand !== undefined) rightHand.value = msg.state.rightHand;
     world.value = toWorld(msg.state);
     const es = this.earlyShares;
     this.earlyShares = null;
-    if (es && world.value) this.post({ kind: "chargeShares", seq: es.seq, ...chargeShares(this.worldBefore, world.value, es.line) });
+    if (es && world.value) this.post({ kind: "chargeShares", seq: es.seq, ...chargeShares(this.worldBefore, world.value, es.line, es.paid) });
     // T-2766: rows alone leave the renderer's network as it is until the full state
     if (!msg.state.rows) this.onState(msg.state);
     if (moved) {
@@ -1171,7 +1217,7 @@ export class ClockClient {
       case "state": {
         const st = msg.state;
         // T-1029: a state that cannot be made whole is dropped, and the worker posts the next whole
-        if (!this.takeRows(st) || !this.takeNet(st)) {
+        if (!this.takeMoney(st) || !this.takeRows(st) || !this.takeNet(st)) {
           console.error("T-1029: a state could not be taken as changes to the last; asking for it whole");
           this.lastNet = null;
           this.post({ kind: "wholeState" });
@@ -1185,10 +1231,15 @@ export class ClockClient {
         break;
       }
       case "money":
-        setMoneyState(msg.money);
+        if (!this.takeMoney(msg)) {
+          console.error("T-3803: a money record could not be taken as changes to the last; asking for a whole state");
+          this.post({ kind: "wholeState" });
+          break;
+        }
+        setMoneyState(msg.money!);
         break;
       case "diagramGraph":
-        this.onDiagram(msg.graphs);
+        this.onDiagram(msg.graphs, !!msg.cut, msg.whole);
         break;
       case "cash": // T-284: fares landing, running costs draining
         liveMoney.value = { cash: msg.cash, today: msg.today, hour: msg.hour, regions: msg.regions };
@@ -1209,6 +1260,9 @@ export class ClockClient {
         break;
       case "hiddenLines":
         takeHiddenLines(msg.lines);
+        break;
+      case "diagramCities":
+        takeDiagramCities(msg.cities);
         break;
       case "stationsAhead":
         stationsAheadSink?.(msg.frame, msg.xy, msg.fine, msg.built, msg.home);
@@ -1282,11 +1336,16 @@ export class ClockClient {
         askBeforeLeaving(msg.on);
         break;
       case "exported": {
-        if (msg.share) { shareExport?.(msg.bytes); break; }
+        if (msg.share) { shareExport?.(msg.bytes ?? null); break; }
+        if (msg.error) { say(workerText(msg.error), true); break; }
         const { slots, active, viewing } = saveSlotsState.value;
-        downloadSave(msg.bytes, viewing?.name || slots.find((s) => s.key === active)?.name || this.cityId, msg.day, active);
+        downloadSave(msg.parts ?? (msg.bytes ? [msg.bytes] : []), viewing?.name || slots.find((s) => s.key === active)?.name || this.cityId, msg.day, active);
         break;
       }
+      case "room":
+        roomSink?.();
+        this.post({ kind: "roomMade" });
+        break;
       case "saveSlots": {
         const before = saveSlotsState.value;
         saveSlotsState.value = { slots: msg.slots, active: msg.active, game: msg.game, writable: msg.writable, at: msg.at, reason: workerText(msg.reason), error: workerText(msg.error), backups: msg.backups, newer: msg.newer, viewing: msg.viewing };
@@ -1319,6 +1378,7 @@ export class ClockClient {
         this.queries.delete(msg.seq);
         this.sent.delete(msg.seq);
         f?.(msg.data);
+        this.pollAnswered(msg.seq, msg.ms);
         break;
       }
       case "trips":
@@ -1338,8 +1398,8 @@ export class ClockClient {
         if (this.editLog.length > 40) this.editLog.shift();
         // T-531: the world before and after this edit's state say where its money went
         // (an early answer's world comes with its state, T-1407)
-        if (msg.ok && msg.charge > 0 && msg.early) this.earlyShares = { seq: msg.seq, line: msg.line };
-        else if (msg.ok && msg.charge > 0 && world.value) this.post({ kind: "chargeShares", seq: msg.seq, ...chargeShares(this.worldBefore, world.value, msg.line) });
+        if (msg.ok && msg.charge > 0 && msg.early) this.earlyShares = { seq: msg.seq, line: msg.line, paid: msg.paid };
+        else if (msg.ok && msg.charge > 0 && world.value) this.post({ kind: "chargeShares", seq: msg.seq, ...chargeShares(this.worldBefore, world.value, msg.line, msg.paid) });
         f?.({ ok: msg.ok, issues: msg.issues, charge: msg.charge, line: msg.line, node: msg.node, skipped: msg.skipped, early: msg.early, held: msg.held });
         break;
       }
@@ -1351,7 +1411,8 @@ export class ClockClient {
           if (msg.arc) this.toCurrentAnchor(msg.anchor, msg.arc, new Float32Array(0));
           if (msg.marks) this.toCurrentAnchor(msg.anchor, new Float64Array(0), msg.marks);
           if (msg.legs) this.toCurrentAnchor(msg.anchor, msg.legs, new Float32Array(0));
-          cb?.({ ok: msg.ok, cost: msg.cost, lengthM: msg.lengthM, mult: msg.mult, ground: msg.ground, issues: msg.issues, verts: msg.verts, pts: msg.pts, speeds: msg.speeds, lanes: msg.lanes, partLanes: msg.partLanes, parts: msg.parts, arc: msg.arc, marks: msg.marks, joins: msg.joins, noFlyover: msg.noFlyover, legs: msg.legs });
+          if (msg.ramps) this.toCurrentAnchor(msg.anchor, new Float64Array(0), msg.ramps);
+          cb?.({ ok: msg.ok, cost: msg.cost, lengthM: msg.lengthM, mult: msg.mult, ground: msg.ground, issues: msg.issues, verts: msg.verts, pts: msg.pts, speeds: msg.speeds, lanes: msg.lanes, partLanes: msg.partLanes, parts: msg.parts, arc: msg.arc, marks: msg.marks, joins: msg.joins, noFlyover: msg.noFlyover, legs: msg.legs, ramps: msg.ramps });
         }, (q, cb) => this.ask(q, cb));
         break;
       }
@@ -1378,7 +1439,7 @@ export class ClockClient {
    * previews stop for `PANEL_HOLD_MS`, the same ones asked once: each takes 15-50 ms in the clock
    * worker on a big network, and a preview behind it waits that long */
   private lastPreviewAt = -Infinity;
-  private heldReads = new Map<string, { q: Extract<ToClock, { kind: "query" }>["q"]; res: ((d: Float64Array) => void)[] }>();
+  private heldReads = new Map<string, { q: Extract<ToClock, { kind: "query" }>["q"]; res: ((d: Float64Array) => void)[]; soon: boolean }>();
   private heldTimer = 0;
   /** T-2766: stop clicks sent and not yet answered, when the last was sent, and when the last was answered */
   private stopsOut = 0;
@@ -1400,26 +1461,40 @@ export class ClockClient {
     }
     const held = [...this.heldReads.values()];
     this.heldReads.clear();
-    for (const h of held) void this.query(h.q).then((d) => h.res.forEach((r, k) => r(k ? d.slice() : d)));
+    for (const h of held) void this.query(h.q, h.soon).then((d) => h.res.forEach((r, k) => r(k ? d.slice() : d)));
   }
-  query(q: Extract<ToClock, { kind: "query" }>["q"]): Promise<Float64Array> {
+  /** `soon`: a poll read past its rest (still behind the queued ones), for a count the player just changed */
+  query(q: ClockQ, soon = false): Promise<Float64Array> {
     if (this.holdsRead(q.what)) {
       const key = JSON.stringify(q);
       return new Promise((res) => {
         const h = this.heldReads.get(key);
-        if (h) h.res.push(res);
-        else this.heldReads.set(key, { q, res: [res] });
+        if (h) { h.res.push(res); h.soon ||= soon; }
+        else this.heldReads.set(key, { q, res: [res], soon });
         if (!this.heldTimer) this.releaseHeld();
       });
     }
     // T-2953: the panels each ask the same account read after an edit (the Lines tab, the trouble list, the
-    // goals); with nothing posted since the first, one answer serves them all
-    const key = PANEL_READS.has(q.what) ? JSON.stringify(q) : "";
+    // goals); with nothing posted since the first, one answer serves them all (each its own copy past the account reads)
+    const poll = POLL_READS.has(q.what), key = poll || PANEL_READS.has(q.what) ? JSON.stringify(q) : "";
     const same = key ? this.readsOut.get(key) : undefined;
-    if (same && same.posts === this.posts) return same.p;
+    if (same && same.posts === this.posts) return PANEL_READS.has(q.what) ? same.p : same.p.then((d) => d.slice());
+    if (poll && (this.pollWait.has(key) || !this.pollGoes(key, soon))) {
+      return new Promise((res) => {
+        const h = this.pollWait.get(key);
+        if (h) { h.res.push(res); h.soon ||= soon; }
+        else this.pollWait.set(key, { q, res: [res], soon });
+        this.pumpPolls();
+      });
+    }
+    return this.sendQuery(q, key, poll);
+  }
+  private sendQuery(q: ClockQ, key: string, poll: boolean): Promise<Float64Array> {
     const seq = ++this.seq;
     this.post({ kind: "query", seq, q });
-    this.sent.set(seq, { what: q.what, at: performance.now() });
+    const at = performance.now();
+    this.sent.set(seq, { what: q.what, at });
+    if (poll) this.pollsOut.set(seq, { at, key });
     const p = new Promise<Float64Array>((res) => this.queries.set(seq, res));
     if (key) {
       const read = { posts: this.posts, p };
@@ -1427,6 +1502,52 @@ export class ClockClient {
       void p.then(() => { if (this.readsOut.get(key) === read) this.readsOut.delete(key); });
     }
     return p;
+  }
+
+  /** T-3801: poll reads waiting on the page (`POLL_READS`), by question, in the order first asked */
+  private pollWait = new Map<string, { q: ClockQ; res: ((d: Float64Array) => void)[]; soon: boolean }>();
+  /** poll reads sent and not answered, by seq: when each was sent, and its question */
+  private pollsOut = new Map<number, { at: number; key: string }>();
+  /** questions answered before: a question new to the page (a panel just opened) skips the rest */
+  private pollSeen = new Set<string>();
+  /** no poll read before this time (performance.now), after the last one's answer */
+  private pollRestUntil = 0;
+  private pollTimer = 0;
+  /** a poll read may go: a question never answered at once; else none other in flight and the rest over (`soon` skips
+   * the rest) */
+  private pollGoes(key: string, soon: boolean): boolean {
+    if (!this.pollSeen.has(key)) return true;
+    const now = performance.now();
+    for (const [seq, r] of this.pollsOut) if (now - r.at > POLL_LOST_MS) this.pollsOut.delete(seq);
+    return !this.pollsOut.size && (soon || now >= this.pollRestUntil) && (this.pollWait.size === 0 || this.pollWait.has(key));
+  }
+  /** the first waiting poll read (a `soon` one first) that may go; else a timer for the rest's end (or a lost read's) */
+  private pumpPolls() {
+    clearTimeout(this.pollTimer);
+    this.pollTimer = 0;
+    const waiting = [...this.pollWait];
+    const first = waiting.find(([, h]) => h.soon) ?? waiting[0];
+    if (!first) return;
+    const [key, h] = first;
+    if (this.pollGoes(key, h.soon)) {
+      this.pollWait.delete(key);
+      void this.sendQuery(h.q, key, true).then((d) => h.res.forEach((r, k) => r(k ? d.slice() : d)));
+      return;
+    }
+    const now = performance.now();
+    let at = h.soon ? now : Math.max(now, this.pollRestUntil);
+    for (const r of this.pollsOut.values()) at = Math.max(at, r.at + POLL_LOST_MS);
+    this.pollTimer = setTimeout(() => this.pumpPolls(), Math.max(1, at - now)) as unknown as number;
+  }
+  /** a poll read answered: the rest from the worker's own time for it, then the next waiting one */
+  private pollAnswered(seq: number, ms: number | undefined) {
+    const r = this.pollsOut.get(seq);
+    if (!r) return;
+    this.pollsOut.delete(seq);
+    this.pollSeen.add(r.key);
+    const cost = ms ?? Math.min(performance.now() - r.at, POLL_REST_MAX_MS);
+    this.pollRestUntil = Math.max(this.pollRestUntil, performance.now() + Math.min(POLL_REST_MAX_MS, POLL_REST * cost));
+    this.pumpPolls();
   }
 
   /** T-3297: `flipSide` above. */

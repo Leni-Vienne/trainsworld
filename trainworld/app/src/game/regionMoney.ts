@@ -12,17 +12,18 @@
 import { computed } from "@preact/signals";
 import { demandByDay, type DemandView } from "./demand";
 import { stationZone } from "./listScope";
-import { baseTrips, lineGeo, liveMoney, moneyState, moneyTerms, moneyWorld, scalesOf, type MoneyTerms } from "./money";
+import { baseTrips, busUpkeepDay, lineGeo, liveMoney, moneyState, moneyTerms, moneyWorld, scalesOf, type MoneyTerms } from "./money";
 import { placeAt, zonesLoaded } from "./zones";
 import { zoneCountry } from "./cities";
 import { runFactorOf } from "./income";
 import { groundDist, packToLngLat } from "./coords";
 import { lineFareMul } from "./fareCurve";
+import { boatOf } from "./boats";
 import { TRACK_SPECS, TRAM_STOP_UPKEEP } from "./trackKinds";
 import { lineFares } from "./fareInEffect";
 import { stopsById, world } from "./world";
 import type { WorldView } from "./types";
-import type { MoneyState } from "../workers/protocol";
+import type { MoneyState, PaidFor } from "../workers/protocol";
 import { newDay, newHour, type DayLedger, type HourLedger } from "../workers/saveFile";
 
 /** [region, share] pairs adding up to 1 ("" outside every zone). */
@@ -87,7 +88,7 @@ export const lineShares = computed(() => {
       // a bent curve's extra goes with the per-km part, as it is counted on the km ridden (T-1516)
       const fx = dm.fareX?.reduce((a, b) => a + b, 0) ?? 0;
       // T-1626, T-2195: a high-speed or ferry line's rate times its multiplier, T-3567 its own (its extra came so from demand)
-      const mul = lineFareMul({ id: l.id, fast: st.fast, ferry: !!st.bus?.ferry, bus: !!st.bus && !st.bus.ferry }, lf);
+      const mul = lineFareMul({ id: l.id, fast: st.fast, ferry: !!st.bus?.ferry, boat: boatOf(st.bus), bus: !!st.bus && !st.bus.ferry }, lf);
       const base = lf.base * (baseOf.get(l.id) ?? 0), perKm = Math.max(0, mul * lf.perKm * pkmAll + fx);
       if (base + perKm > 0) {
         const mix = new Map<string, number>();
@@ -184,7 +185,9 @@ export const upkeepShares = computed<Shares>(() => {
   for (const s of w.save.stations) if (s.built) add(out, stationZone(s) ?? "", s.port ? (m.upkeepPort ?? 0) * m.economy : stationUpkeepOf(m, s));
   for (const l of w.save.lines) {
     if (!w.lineStats[l.id]?.bus?.built || w.lineStats[l.id]?.bus?.ferry) continue; // T-2194: a ferry route has no upkeep
-    for (const [z, km] of busKmByRegion(w, l.id)) add(out, z, km * (m.upkeepBusKm ?? 0) * m.economy);
+    // T-3907: a BRT route's upkeep spread over its road as an average a km
+    const b = w.lineStats[l.id]!.bus!, perKm = b.roadM > 0 ? busUpkeepDay(m, b) / (b.roadM / 1000) : 0;
+    for (const [z, km] of busKmByRegion(w, l.id)) add(out, z, km * perKm * m.economy);
   }
   const next = norm(out);
   if (!sameShares(next, lastUpkeep)) lastUpkeep = next;
@@ -193,7 +196,8 @@ export const upkeepShares = computed<Shares>(() => {
 
 /** How the last paid edit's charge divides: construction by the cost of the track it built in each
  * region (a station alone by its own region), new trains by `line`'s route km, else as construction. */
-export function chargeShares(before: WorldView | null, after: WorldView, line?: number): { build: Shares; trains: Shares } {
+export function chargeShares(before: WorldView | null, after: WorldView, line?: number, paid?: PaidFor): { build: Shares; trains: Shares } {
+  line ??= paid?.line;
   const was = new Map(before?.edges.map((e) => [e.id, e.built]) ?? []);
   const cost = new Map<string, number>();
   for (const e of after.edges) {
@@ -202,10 +206,14 @@ export function chargeShares(before: WorldView | null, after: WorldView, line?: 
     if (!a || !b) continue;
     add(cost, placeAt((a.lng + b.lng) / 2, (a.lat + b.lat) / 2) ?? "", e.cost);
   }
-  const perKm = (moneyState.peek()?.busRouteKm ?? 0) * 1e6;
+  const ms = moneyState.peek(), perKm = (ms?.busRouteKm ?? 0) * 1e6, brtKm = (ms?.brtRouteKm ?? 0) * 1e6;
   for (const l of after.save.lines) {
-    if (!after.lineStats[l.id]?.bus?.built || before?.lineStats[l.id]?.bus?.built || after.lineStats[l.id]?.bus?.ferry) continue;
-    for (const [z, km] of busKmByRegion(after, l.id)) add(cost, z, km * perKm);
+    const now = after.lineStats[l.id]?.bus, was = before?.lineStats[l.id]?.bus;
+    if (!now?.built || now.ferry) continue;
+    // T-3907: a constructed line switched to BRT pays its lanes in town, spread over its road
+    const town = now.roadM > 0 ? Math.min(1, now.townM / now.roadM) : 0;
+    const price = (was?.built ? 0 : perKm) + (now.brt && !(was?.built && was.brt) ? brtKm * town : 0);
+    if (price > 0) for (const [z, km] of busKmByRegion(after, l.id)) add(cost, z, km * price);
   }
   if (!cost.size) {
     const built = new Set(before?.save.stations.filter((s) => s.built).map((s) => s.id) ?? []);
@@ -220,6 +228,19 @@ export function chargeShares(before: WorldView | null, after: WorldView, line?: 
       let x = 0, y = 0;
       for (let i = 0; i < n; i++) x += b.corners[2 * i] / n, y += b.corners[2 * i + 1] / n;
       add(cost, placeAt(...packToLngLat(x, y)) ?? "", 1);
+    }
+  }
+  // T-3844: an upgrade or a changed piece builds nothing new: the edit's answer names the stations and pieces
+  if (!cost.size && paid) {
+    const num = new Map(after.save.stations.map((s) => [s.num, s]));
+    for (const n of paid.nodes ?? []) {
+      const s = num.get(n), p = after.nodes.get(n);
+      const z = s ? stationZone(s) : p ? placeAt(p.lng, p.lat) : undefined;
+      if (z !== undefined) add(cost, z ?? "", 1);
+    }
+    for (const id of paid.edges ?? []) {
+      const e = after.edges.find((x) => x.id === id), a = e && after.nodes.get(e.a), b = e && after.nodes.get(e.b);
+      if (a && b) add(cost, placeAt((a.lng + b.lng) / 2, (a.lat + b.lat) / 2) ?? "", 1);
     }
   }
   const build = norm(cost);

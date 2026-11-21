@@ -19,9 +19,9 @@ impl TrackApi {
     #[allow(clippy::too_many_arguments)]
     pub fn set_line_with_trains(&mut self, id: u32, stops: &[u32], high: u32, medium: u32, low: u32, dwell_s: f32, turnaround_s: f32, cars: u8, colour: u32, name: String) -> u32 {
         let Some((stops, path)) = edited_stops(&self.w.net, stops, false, &[]) else {
-            return self.refuse(Issue::LinePath { line: id });
+            return self.no_route(id, stops);
         };
-        let mut d = LineData { rows: 0, x: Default::default(), symbol: String::new(), trains: Some([high, medium, low]), auto: None, name, colour, tph: if stops.len() < 2 { [0.0; 3] } else { [6.0, 3.0, 1.0] }, stops, path, dwell_s, turnaround_s, cars, fast: false, bus: None, ferry: None, group: 0, group_name: String::new(), group_look: Default::default(), day: 0, hand: false, one_way: false, limit: 0, twin: Default::default(), weekend: Default::default(), ones: vec![], fare_dist: false };
+        let mut d = LineData { rows: 0, x: Default::default(), symbol: String::new(), trains: Some([high, medium, low]), auto: None, name, colour, tph: if stops.len() < 2 { [0.0; 3] } else { [6.0, 3.0, 1.0] }, stops, path, dwell_s, turnaround_s, cars, fast: false, bus: None, ferry: None, group: 0, group_name: String::new(), group_look: Default::default(), outer: vec![], day: 0, hand: false, one_way: false, limit: 0, twin: Default::default(), weekend: Default::default(), ones: vec![], fare_dist: false };
         // T-3542: a line of four or five rows runs its high count at midday and in the afternoon too
         d.x = Extra::of_high(&d);
         self.run(Op::Line { id, data: Some(d) })
@@ -29,7 +29,10 @@ impl TrackApi {
     /// Change a line's stops, keeping everything else; the path is found again.
     pub fn set_stops(&mut self, id: u32, stops: &[u32]) -> u32 {
         let Some(mut d) = self.w.net.line_data(id) else { return self.refuse(Issue::NoSuchLine { line: id }) };
-        let Some((stops, path)) = edited_stops(&self.w.net, stops, d.hand, &d.ones) else { return self.refuse(Issue::LinePath { line: id }) };
+        if self.port_clash(&d, stops) {
+            return self.refuse(Issue::PortStop { line: id });
+        }
+        let Some((stops, path)) = edited_stops(&self.w.net, stops, d.hand, &d.ones) else { return self.no_route(id, stops) };
         d.stops = stops;
         d.path = path;
         if !settle_ones(&self.w.net, &mut d) {
@@ -44,7 +47,7 @@ impl TrackApi {
         if d.bus.is_some() || d.ferry.is_some() {
             return self.refuse(Issue::LinePath { line: id });
         }
-        let Some((stops, path)) = edited_stops(&self.w.net, stops, true, &d.ones) else { return self.refuse(Issue::LinePath { line: id }) };
+        let Some((stops, path)) = edited_stops(&self.w.net, stops, true, &d.ones) else { return self.no_route(id, stops) };
         d.stops = stops;
         d.path = path;
         d.hand = true;
@@ -67,7 +70,8 @@ impl TrackApi {
                     once.push(s);
                 }
             }
-            let mut memo = HopMemo::new();
+            // T-3889: the stops go in one at a time, so a tram line's first few may hold no tram stop
+            let mut memo = HopMemo::of(net.stops_tram(&d.stops));
             // T-3565: one-way stations go where the track puts them, whatever the cost
             if let Some((stops, path)) = super::legs::sorted(net, &once, &mut memo, &d.ones) {
                 (d.stops, d.path) = (stops, path);
@@ -91,6 +95,11 @@ impl TrackApi {
         }
         self.run(Op::Line { id, data: Some(d) })
     }
+    /// T-3889: whether a line with these stops runs trams (a tram stop among them), so a new line
+    /// starts with the tram's defaults.
+    pub fn stops_tram(&self, stops: &[u32]) -> bool {
+        self.w.net.stops_tram(stops)
+    }
     /// T-2895: whether the line keeps a stop order the player set.
     pub fn line_hand(&self, id: u32) -> bool {
         self.w.net.line_ok(id) && self.w.net.line_hand[id as usize]
@@ -107,6 +116,8 @@ impl TrackApi {
         }
         match net.route_hops(&stops, &[]) {
             Ok(_) => vec![],
+            // T-3889: a train line kept off tram track: `order_stops` says so
+            Err(k) if !net.stops_tram(&stops) && !net.joined_by(stops[k], stops[k + 1], false) && net.joined(stops[k], stops[k + 1]) => vec![],
             Err(k) => vec![if net.joined(stops[k], stops[k + 1]) { 1.0 } else { 0.0 }, stops[k] as f64, stops[k + 1] as f64],
         }
     }
@@ -192,6 +203,10 @@ impl TrackApi {
         if d.auto.is_some() {
             d.auto = Some([0; 3]);
         }
+        // T-3834: the midday and afternoon rows of a line of four or five rows start empty too
+        d.x.tph = [0.0; 2];
+        d.x.trains = [0; 2];
+        d.x.auto = [0; 2];
         // T-1791: the copy joins its source's group, a new one with the source if it had none
         let mut ops = vec![];
         if d.group == 0 {
@@ -207,10 +222,66 @@ impl TrackApi {
     }
 
     // ---- line groups (T-1791): a grouping for the Lines tab; no service edit
-    /// A group number no live line has.
+    /// A group number no live line has, at any depth.
     pub fn new_line_group(&self) -> u32 {
         let n = &self.w.net;
-        (0..n.line_count()).filter(|&l| n.line_ok(l as u32)).map(|l| n.line_group[l]).max().unwrap_or(0) + 1
+        (0..n.line_count()).filter(|&l| n.line_ok(l as u32)).flat_map(|l| std::iter::once(n.line_group[l]).chain(n.line_group_outer[l].iter().map(|o| o.group))).max().unwrap_or(0) + 1
+    }
+    /// T-3423: the groups a line's own group sits in, nearest first.
+    pub fn line_group_outer(&self, id: u32) -> Vec<u32> {
+        if self.w.net.line_ok(id) { self.w.net.line_group_outer[id as usize].iter().map(|o| o.group).collect() } else { vec![] }
+    }
+    /// The name of the `k`th group around a line's own (`line_group_outer`), empty for the default.
+    pub fn line_group_outer_name(&self, id: u32, k: u32) -> String {
+        self.outer_at(id, k).map_or_else(String::new, |o| o.name.clone())
+    }
+    /// The bullet text of the `k`th group around a line's own, empty for none set.
+    pub fn line_group_outer_symbol(&self, id: u32, k: u32) -> String {
+        self.outer_at(id, k).map_or_else(String::new, |o| o.look.symbol.clone())
+    }
+    /// The bullet colour of the `k`th group around a line's own, -1 for none set.
+    pub fn line_group_outer_colour(&self, id: u32, k: u32) -> i32 {
+        self.outer_at(id, k).and_then(|o| o.look.colour).map_or(-1, |c| c as i32)
+    }
+    /// T-3423: put `lines` and the groups `groups` straight in `group` (0: in no group), one undoable
+    /// edit. A group no line is in yet is made inside `parent` (0: at the top). Refused for a group put
+    /// in itself or in a group inside it.
+    pub fn set_group_members(&mut self, lines: &[u32], groups: &[u32], group: u32, parent: u32) -> u32 {
+        let n = &self.w.net;
+        if let Some(&l) = lines.iter().find(|&&l| !n.line_ok(l)) {
+            return self.refuse(Issue::NoSuchLine { line: l });
+        }
+        let mut chains = group_chains(n);
+        let target = if group == 0 {
+            vec![]
+        } else {
+            let at = chain_from(&chains, group);
+            if !at.is_empty() { at } else if parent == group { return self.refuse(Issue::NoSuchLine { line: u32::MAX }); } else {
+                let up = chain_from(&chains, parent);
+                if parent != 0 && up.is_empty() { return self.refuse(Issue::NoSuchLine { line: u32::MAX }); }
+                std::iter::once(OuterGroup { group, ..Default::default() }).chain(up).collect()
+            }
+        };
+        for &g in groups {
+            if g == 0 || target.iter().any(|o| o.group == g) || chain_from(&chains, g).is_empty() {
+                return self.refuse(Issue::NoSuchLine { line: u32::MAX });
+            }
+        }
+        for (l, c) in chains.iter_mut() {
+            if lines.contains(l) {
+                *c = target.clone();
+            } else if let Some(k) = c.iter().position(|o| groups.contains(&o.group)) {
+                c.truncate(k + 1);
+                c.extend(target.iter().cloned());
+            }
+        }
+        self.run_chains(chains)
+    }
+    /// Put `lines` in `group` (0: out of any group), one undoable edit; a group no line is in yet is
+    /// made at the top. A line joining takes the group's name; a group left with one member stops
+    /// being one, and that member moves to the group around it (T-3423).
+    pub fn set_line_group(&mut self, lines: &[u32], group: u32) -> u32 {
+        self.set_group_members(lines, &[], group, 0)
     }
     /// A line's group, 0 for none.
     pub fn line_group(&self, id: u32) -> u32 {
@@ -220,47 +291,15 @@ impl TrackApi {
     pub fn line_group_name(&self, id: u32) -> String {
         if self.w.net.line_ok(id) { self.w.net.line_group_name[id as usize].clone() } else { String::new() }
     }
-    /// Put `lines` in `group` (0: out of any group), one undoable edit. A line joining takes the
-    /// group's name; a group left with one line stops being one.
-    pub fn set_line_group(&mut self, lines: &[u32], group: u32) -> u32 {
-        let n = &self.w.net;
-        if let Some(&l) = lines.iter().find(|&&l| !n.line_ok(l)) {
-            return self.refuse(Issue::NoSuchLine { line: l });
-        }
-        let live = || (0..n.line_count() as u32).filter(|&l| n.line_ok(l));
-        let meta = |l: u32| (n.line_group_name[l as usize].clone(), n.line_group_look[l as usize].clone());
-        let joined = if group == 0 { Default::default() } else { live().find(|&l| n.line_group[l as usize] == group && !lines.contains(&l)).map_or_else(Default::default, meta) };
-        let mut after: Vec<(u32, u32, (String, GroupLook))> = live().map(|l| {
-            if lines.contains(&l) { (l, group, joined.clone()) } else { (l, n.line_group[l as usize], meta(l)) }
-        }).collect();
-        // a group of one dissolves
-        for k in 0..after.len() {
-            let g = after[k].1;
-            if g != 0 && after.iter().filter(|x| x.1 == g).count() == 1 {
-                after[k] = (after[k].0, 0, Default::default());
-            }
-        }
-        let ops: Vec<Op> = after.into_iter().filter(|(l, g, m)| n.line_group[*l as usize] != *g || meta(*l) != *m).map(|(l, g, (s, look))| {
-            let mut d = n.line_data(l).unwrap();
-            d.group = g;
-            d.group_name = s;
-            d.group_look = look;
-            Op::Line { id: l, data: Some(d) }
-        }).collect();
-        if ops.is_empty() {
-            return 0;
-        }
-        self.run(Op::Batch(ops))
-    }
     /// Name a group (empty: its oldest line's name again), one undoable edit.
     pub fn set_line_group_name(&mut self, group: u32, name: String) -> u32 {
-        self.edit_group(group, |d| d.group_name = name.clone())
+        self.edit_group(group, |o| o.name = name.clone())
     }
     /// T-1813: a group's bullet text (empty: from its name) and colour (negative: the colour most
     /// of its lines share), one undoable edit.
     pub fn set_line_group_look(&mut self, group: u32, symbol: String, colour: i32) -> u32 {
         let look = GroupLook { symbol, colour: u32::try_from(colour).ok().map(|c| c & 0xff_ffff) };
-        self.edit_group(group, |d| d.group_look = look.clone())
+        self.edit_group(group, |o| o.look = look.clone())
     }
     /// A group's bullet text set by hand, empty for none.
     pub fn line_group_symbol(&self, id: u32) -> String {
@@ -306,7 +345,13 @@ impl TrackApi {
     /// 2 when there is nowhere to put it.
     pub fn add_stop(&mut self, id: u32, station: u32) -> u32 {
         let Some(mut d) = self.w.net.line_data(id) else { return self.refuse(Issue::NoSuchLine { line: id }) };
+        if self.port_clash(&d, &[station]) {
+            return self.refuse(Issue::PortStop { line: id });
+        }
         let Some((stops, _)) = best_insert(&self.w.net, id, station, &mut HopMemo::new()) else {
+            if self.train_kept_off(&d.stops, station) {
+                return self.refuse(Issue::TramTrack { line: id });
+            }
             self.issues.clear();
             self.money_short = None;
             return 2;
@@ -330,6 +375,9 @@ impl TrackApi {
         if d.bus.is_some() || d.ferry.is_some() || !net.is_station(station) {
             return self.refuse(Issue::LinePath { line: id });
         }
+        if net.is_port(station) {
+            return self.refuse(Issue::PortStop { line: id });
+        }
         if !net.can_one_stop(station) {
             return if d.stops.contains(&station) { 0 } else { self.add_stop(id, station) };
         }
@@ -341,6 +389,9 @@ impl TrackApi {
             }
         } else {
             let Some((stops, _)) = best_insert(net, id, station, &mut HopMemo::new()) else {
+                if self.train_kept_off(&d.stops, station) {
+                    return self.refuse(Issue::TramTrack { line: id });
+                }
                 self.issues.clear();
                 self.money_short = None;
                 return 2;
@@ -396,13 +447,14 @@ impl TrackApi {
     /// first or last stop, where a click closes the line into a circle (T-3203), 6 a loop's first stop, where a click
     /// opens it (T-798), 7 the stop before a loop at an end of the line, where a click turns the
     /// line round it (`turn_end`), 8 that stop on a line so turned, where a click opens it again
-    /// (`open_loop`, T-3021). Worked out with `insert_stop`'s own search, so the markers say what a
-    /// click does. Empty if the line is not there.
+    /// (`open_loop`, T-3021), 9 a train line reaches it only over tram track (T-3889), 10 a ferry port (T-3911). Worked out with
+    /// `insert_stop`'s own search, so the markers say what a click does. Empty if the line is not there.
     pub fn stop_tiers(&self, line: u32) -> Vec<f64> {
         let net = &self.w.net;
         if !net.line_ok(line) {
             return vec![];
         }
+        let Some(line_d) = net.line_data(line) else { return vec![] };
         let stops = net.line_stops(line);
         let old = net.line_path(line);
         let old_turns = turn_nodes(net, old);
@@ -415,7 +467,9 @@ impl TrackApi {
             if !net.node_ok(n) || net.node_platform[n as usize] == 0 {
                 continue;
             }
-            let (tier, at) = if turn_at.contains(&n) && ((stops.first() != Some(&n) && stops.last() != Some(&n)) || closed(stops)) {
+            let (tier, at) = if self.port_clash(&line_d, &[n]) {
+                (10.0, -1.0)
+            } else if turn_at.contains(&n) && ((stops.first() != Some(&n) && stops.last() != Some(&n)) || closed(stops)) {
                 (7.0, -1.0)
             } else if stops.first() == Some(&n) && closed(stops) {
                 (6.0, -1.0)
@@ -431,6 +485,7 @@ impl TrackApi {
                 (3.0, -1.0)
             } else {
                 match best_insert(net, line, n, &mut memo) {
+                    None if self.train_kept_off(stops, n) => (9.0, -1.0),
                     None => (3.0, -1.0),
                     Some((_, path)) => match turn_nodes(net, &path).into_iter().find(|t| !old_turns.contains(t)) {
                         Some(t) => (4.0, t as f64),
@@ -480,6 +535,10 @@ impl TrackApi {
     /// T-2981: whether a line is a loop that runs one way, round in the direction it was drawn.
     pub fn line_one_way(&self, line: u32) -> bool {
         self.w.svc.lines.get(line as usize).is_some_and(|l| l.ok && l.one_way)
+    }
+    /// T-3835: a loop set both ways that runs one way, as its track takes it round only one way.
+    pub fn line_one_way_by_track(&self, line: u32) -> bool {
+        self.line_one_way(line) && !self.w.net.line_one_way.get(line as usize).copied().unwrap_or(false)
     }
     /// T-2981: run a line's loop one way or both ways. Kept on an open line for when it closes.
     pub fn set_line_one_way(&mut self, id: u32, on: bool) -> u32 {
@@ -601,14 +660,13 @@ impl TrackApi {
     /// Remove a line. A constructed bus route goes for good, like constructed track (T-1464).
     pub fn remove_line(&mut self, id: u32) -> u32 {
         let mut op = Op::Line { id, data: None };
-        // the last other line of its group leaves it too (T-1791)
+        // a group it leaves with one member stops being one (T-1791, T-3423)
         let n = &self.w.net;
-        let g = self.line_group(id);
-        let rest: Vec<u32> = (0..n.line_count() as u32).filter(|&l| g != 0 && l != id && n.line_ok(l) && n.line_group[l as usize] == g).collect();
-        if let [other] = rest[..] {
-            let mut d = n.line_data(other).unwrap();
-            d.group = 0;
-            op = Op::Batch(vec![op, Op::Line { id: other, data: Some(d) }]);
+        let mut chains = group_chains(n);
+        chains.retain(|(l, _)| *l != id);
+        let rest = chain_ops(n, settle_groups(chains));
+        if !rest.is_empty() {
+            op = Op::Batch(std::iter::once(op).chain(rest).collect());
         }
         if self.w.net.line_bus.get(id as usize).and_then(|b| b.as_ref()).is_some_and(|r| r.built) {
             return self.run_charged(op);
@@ -631,7 +689,9 @@ impl TrackApi {
         let [high, medium, low] = if pairs_split(&self.w.net, id) { counts.map(|x| x.div_ceil(2)) } else { counts };
         let op = if d.auto.is_some() { Op::AutoTrains { id, auto: None, trains: Some([high, medium, low]) } } else { Op::TrainCounts { id, trains: Some([high, medium, low]), tph: d.tph } };
         let op = self.high_rows(id, op, |x| x.trains = [high; 2]);
-        if recorded { self.run(op) } else { self.run_unrecorded(op) }
+        // T-3646: an edit before it that is undone takes it back, and makes it again unless it set
+        // this line (`TrackWorld::step`)
+        if recorded { self.run(op) } else { self.run_off_history(op, true) }
     }
     /// T-3542: an edit of three rows (high, medium, low) on a line of four or five rows sets all
     /// its high periods' rows (`set`: midday's and afternoon's from high's) with it.
@@ -1017,6 +1077,29 @@ impl TrackApi {
 
 }
 
+impl TrackApi {
+    /// T-3889: the refusal for `stops` that have no route as line `id`'s: `TramTrack` where they are
+    /// a train line's (no tram stop) and only tram track joins one of them to the first, else
+    /// `LinePath`.
+    fn no_route(&mut self, id: u32, stops: &[u32]) -> u32 {
+        let net = &self.w.net;
+        let kept_off = !net.stops_tram(stops) && stops.first().is_some_and(|&a| stops[1..].iter().any(|&b| net.node_ok(a) && net.node_ok(b) && !net.joined_by(a, b, false) && net.joined(a, b)));
+        self.refuse(if kept_off { Issue::TramTrack { line: id } } else { Issue::LinePath { line: id } })
+    }
+
+    /// T-3889: `station` would join a train line with `stops` (neither has a tram stop) only over
+    /// tram track.
+    /// T-3911: a ferry port among `stops` of a train or tram line `d`.
+    fn port_clash(&self, d: &LineData, stops: &[u32]) -> bool {
+        d.bus.is_none() && d.ferry.is_none() && stops.iter().any(|&s| self.w.net.is_port(s))
+    }
+
+    fn train_kept_off(&self, stops: &[u32], station: u32) -> bool {
+        let net = &self.w.net;
+        !net.stops_tram(stops) && !net.tram_stop(station) && stops.first().is_some_and(|&a| net.node_ok(a) && net.node_ok(station) && !net.joined_by(a, station, false) && net.joined(a, station))
+    }
+}
+
 /// A stop repeated straight after itself counts once (T-1242): a loop's middle stop taken out
 /// leaves a one-stop line, not a refusal.
 fn distinct_stops(stops: &[u32]) -> Vec<u32> {
@@ -1159,19 +1242,89 @@ fn stopped_at(net: &Network, d: &LineData, station: u32) -> Option<Vec<u32>> {
 }
 
 impl TrackApi {
-    /// Change every line of a group (T-1791, T-1813) in one undoable edit.
-    fn edit_group(&mut self, group: u32, f: impl Fn(&mut LineData)) -> u32 {
+    /// Change a group's name or bullet on every line in it, at any depth (T-1791, T-1813, T-3423), in
+    /// one undoable edit.
+    fn edit_group(&mut self, group: u32, f: impl Fn(&mut OuterGroup)) -> u32 {
         let n = &self.w.net;
-        let ops: Vec<Op> = (0..n.line_count() as u32).filter(|&l| group != 0 && n.line_ok(l) && n.line_group[l as usize] == group).map(|l| {
-            let mut d = n.line_data(l).unwrap();
-            f(&mut d);
-            Op::Line { id: l, data: Some(d) }
-        }).collect();
-        if ops.is_empty() {
+        let mut chains = group_chains(n);
+        let mut any = false;
+        for (_, c) in chains.iter_mut() {
+            if let Some(o) = c.iter_mut().find(|o| group != 0 && o.group == group) {
+                f(o);
+                any = true;
+            }
+        }
+        if !any {
             return self.refuse(Issue::NoSuchLine { line: u32::MAX });
+        }
+        let ops = chain_ops(n, chains);
+        if ops.is_empty() {
+            return 0;
         }
         self.run(Op::Batch(ops))
     }
+    /// T-3423: settle new group chains (`group_chains`) and run the lines they change as one edit.
+    fn run_chains(&mut self, chains: Vec<(u32, Vec<OuterGroup>)>) -> u32 {
+        let ops = chain_ops(&self.w.net, settle_groups(chains));
+        if ops.is_empty() {
+            return 0;
+        }
+        self.run(Op::Batch(ops))
+    }
+    fn outer_at(&self, id: u32, k: u32) -> Option<&OuterGroup> {
+        if self.w.net.line_ok(id) { self.w.net.line_group_outer[id as usize].get(k as usize) } else { None }
+    }
+}
+
+/// T-3423: every live line with its chain: its own group first, then the groups around it (empty for
+/// a line in no group).
+fn group_chains(n: &Network) -> Vec<(u32, Vec<OuterGroup>)> {
+    (0..n.line_count() as u32).filter(|&l| n.line_ok(l)).map(|l| {
+        let i = l as usize;
+        if n.line_group[i] == 0 { return (l, vec![]); }
+        let own = OuterGroup { group: n.line_group[i], name: n.line_group_name[i].clone(), look: n.line_group_look[i].clone() };
+        (l, std::iter::once(own).chain(n.line_group_outer[i].iter().cloned()).collect())
+    }).collect()
+}
+
+/// The chain from group `g` outward, `g` first, as its lines have it; empty for 0 or no such group.
+fn chain_from(chains: &[(u32, Vec<OuterGroup>)], g: u32) -> Vec<OuterGroup> {
+    if g == 0 { return vec![]; }
+    chains.iter().find_map(|(_, c)| c.iter().position(|o| o.group == g).map(|k| c[k..].to_vec())).unwrap_or_default()
+}
+
+/// A group with fewer than two members (lines straight in it, groups straight under it) stops being
+/// one: its member moves to the group around it.
+fn settle_groups(mut chains: Vec<(u32, Vec<OuterGroup>)>) -> Vec<(u32, Vec<OuterGroup>)> {
+    loop {
+        let mut members: std::collections::HashMap<u32, std::collections::HashSet<(bool, u32)>> = Default::default();
+        for (l, c) in &chains {
+            if let Some(o) = c.first() { members.entry(o.group).or_default().insert((false, *l)); }
+            for w in c.windows(2) { members.entry(w[1].group).or_default().insert((true, w[0].group)); }
+        }
+        let lone: std::collections::HashSet<u32> = members.iter().filter(|(_, m)| m.len() < 2).map(|(g, _)| *g).collect();
+        if lone.is_empty() { return chains; }
+        for (_, c) in chains.iter_mut() { c.retain(|o| !lone.contains(&o.group)); }
+    }
+}
+
+/// The line edits that give each listed line its chain; a line not listed (one being deleted) is left alone.
+fn chain_ops(n: &Network, chains: Vec<(u32, Vec<OuterGroup>)>) -> Vec<Op> {
+    let by: std::collections::HashMap<u32, Vec<OuterGroup>> = chains.into_iter().collect();
+    (0..n.line_count() as u32).filter(|&l| n.line_ok(l)).filter_map(|l| {
+        let i = l as usize;
+        let c = &by.get(&l)?[..];
+        let (own, outer) = c.split_first().map_or((OuterGroup::default(), &[][..]), |(a, b)| (a.clone(), b));
+        if n.line_group[i] == own.group && n.line_group_name[i] == own.name && n.line_group_look[i] == own.look && n.line_group_outer[i] == outer {
+            return None;
+        }
+        let mut d = n.line_data(l).unwrap();
+        d.group = own.group;
+        d.group_name = own.name;
+        d.group_look = own.look;
+        d.outer = outer.to_vec();
+        Some(Op::Line { id: l, data: Some(d) })
+    }).collect()
 }
 
 /// T-3142: `line_stop_ways` for a bus or ferry loop run one way. A stop is served one way when the route passes its

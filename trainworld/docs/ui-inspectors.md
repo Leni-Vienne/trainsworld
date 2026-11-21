@@ -114,8 +114,9 @@ purpose filter the purpose drawn is ringed in the bar.
 ### The Lines tab
 
 - **The Lines tab** has New line above its list (actions go above lists of any length; new bus and ferry lines are started from the Build tab or U and O, T-3420). The list
-  sorts by clicking a column header [T-310]: Name, City (below), Riders (today), Money (the line's expected profit today, fares less running cost and its share of upkeep, in the money format with negatives red; its hover gives "Expected profit today", the fares, the running cost, the upkeep and, on a weekend or holiday, a line saying so) [T-735, T-1893], Trains and Near. A click sorts by that
-  column (names A to Z, figures biggest first, Near nearest first), a second reverses it, the sorted
+  sorts by clicking a column header [T-310]: Name, Type (T-3798, T-3808: train, high speed, tram, bus, ferry; a narrow column before Near of each line's type icon,
+  `Icon.highSpeed` for high speed, its name in the hover, always shown; a group goes with the type most of its lines are), City (below), Riders (today), Money (the line's expected profit today, fares less running cost and its share of upkeep, in the money format with negatives red; its hover gives "Expected profit today", the fares, the running cost, the upkeep and, on a weekend or holiday, a line saying so) [T-735, T-1893], Trains and Near. A click sorts by that
+  column (names A to Z, figures biggest first, Type and Near in their order), a second reverses it, the sorted
   column has a small arrow, and each header's hover says what it sorts by. Names sort naturally, ties
   by name. The name keeps at least about six characters; the Money column goes first when the
   dock is too narrow, then the City column beside Near [T-746]. Lines default to by riders, most first [T-905]. The sort is kept while the page is open and re-runs each game hour.
@@ -180,18 +181,33 @@ purpose filter the purpose drawn is ringed in the bar.
   City column follows Name (the first stop's city, named as the Cities list names it, `stationZone`;
   hover "The first stop is in Toronto"). It sorts like the others and takes room from the Riders and
   Trains columns.
+- **The gear** [T-3816, T-3799; `ui/LinesGear.tsx`, `game/linesView.ts`]: last in the row with the eye and the
+  scope toggle, a gear opens a popover (closed by a click outside or Esc) with the line types to list (a pressed
+  button per type the game's lines have), the cities to list (a box per city a line stops in, a city being the
+  zone a stop is in, `stationCity`, as fares by city; the heading's box ticks or unticks them all) and the columns
+  to show (City, Riders, Money, Fleet, Type; Name always, Near while sorted on). A section with fewer than two
+  choices is left out, and a choice turned off that the game does not offer counts for nothing. The filters
+  apply on top of the scope: a line is listed when both let it through; it passes the cities when any stop is in
+  a ticked city or no stop is in any city. A line with no stops and the selected line always pass. A group is
+  listed when any line in it passes, and open shows only those, but its figures, bullet, Type and hover stay
+  every line's. While the filters keep any line in the game off the list, the gear has a dot and its hover says
+  how many ("3 lines not listed"). A sort on a column turned off goes to Name. Kept per browser (localStorage
+  `trainworld-lines-view`, what is turned off), never in the save.
 - **Line groups and dragging** [T-1791, T-1813, `game/lineGroups.ts`, `game/handOrder.ts`; the model in [track-and-service.md](track-and-service.md) 6.3]:
   a row is dragged with the mouse or a pen once the pointer has moved 6 px (touch scrolls the list
-  as before). Let go over the middle third of a line's row and the two make a group; over the
-  middle of a group's row or one of its lines, the line joins that group. Let go over the top or
-  bottom third, and the line goes into the gap there: out of its group if it was in one, unless the
-  gap is inside an open group (between its row and its first line, or between two of its lines),
-  where it goes into that group at that place; the gap under a group's last line counts as inside
-  for that group's own lines and outside for any other. A group's row is dragged the same way, its
-  whole row only into gaps (top or bottom half). While dragging, the row's bullet and name follow
-  the pointer, the dragged row is faded, the row it would join is outlined and a gap is a 2 px
+  as before). **Groups nest** to any depth [T-3423]: a group's members are lines and groups, and a
+  group's row is dragged exactly as a line's, never into itself or a group inside it. Let go over
+  the middle third of a group's row and the row joins that group; over a line's row in a group, it
+  joins that line's group; over a line's row at the dragged row's own level (both outside any group,
+  or both straight in one group), the two make a new group there. Let go over the top or
+  bottom third, and the row goes into the gap there: out of its group if it was in one, unless the
+  gap is inside an open group (between its row and its first member, or between two of its members),
+  where it goes into that group at that place; the gap under a group's last row counts as inside
+  for that group's own members and outside for any other. While dragging, the row's bullet and name follow
+  the pointer, the dragged row is faded, the row it would join is outlined (and the group it joins) and a gap is a 2 px
   line in the accent colour; a drop that would change nothing shows nothing; Esc cancels. A group
-  left with one line is no group. **The hand order**: a drop into a gap that moves a row puts the
+  left with one member is no group: that member moves to the group around it, so a group in the
+  middle gone keeps its contents one level up. **The hand order**: a drop into a gap that moves a row puts the
   whole list, every line in every place, in the player's own order (the order shown, then the
   move), saved with the game; while it holds, no column header is lit and new lines go last. A
   click on a header sorts by it and drops the hand order. Inside a group, the hand order is also
@@ -202,9 +218,9 @@ purpose filter the purpose drawn is ringed in the bar.
   typing the oldest line's name back clears it), and its lines' riders, money and trains added up,
   each hover listing the lines' own figures (riders "1.59M riders in past 24h in total", money
   "Expected profit today in total: $x"; a rider changing between two of its lines counts twice), the trains
-  uncoloured. Only running lines count; a group with none reads Planned (or Broken). A group
-  shows open by default [T-1818], its lines indented 24 px, each a line row as any other, sorted
-  by the tab's sort (or the hand order); the chevron closes it, and what the player closed stays
+  uncoloured; a group's figures and hovers are all its lines', at any depth. Only running lines count; a group with none reads Planned (or Broken). A group
+  shows open by default [T-1818], its members indented 24 px and each level deeper another 18 px, each a row as any other, sorted
+  by the tab's sort (or the hand order); the chevron closes it and everything in it, and what the player closed stays
   closed while the page is open. The riders, money and trains columns have fixed widths that
   never shrink, so every row, a group's and its lines' and the header's, has them in the same
   place at any dock width; a wide bullet or a long group name gives up room from the name,
@@ -283,10 +299,11 @@ purpose filter the purpose drawn is ringed in the bar.
   Above it, for a line in a group [T-1791, T-1813, T-1818], a row reading "Part of [bullet]
   group", the group's bullet inline (a click opens the group view, hover "Open the group", led
   by the group's full name where the bullet reads it shorter; a long name is cut with an
-  ellipsis), and a Leave group button at the right (an arrow out of a box, hover "Leave group"),
-  there for touch, where dragging rows is not; a bus line's panel has the same row. The row
+  ellipsis); a bus line's panel has the same row, and so does a group's view for a group in
+  another (T-3423). There is no Leave group button: a line leaves by dragging it out in the Lines
+  tab (T-3810). The row
   starts 6 px below the title, which covers that much of whatever follows it.
-- **Actions** at the top, under the title and the planned or broken notice: Edit stops (hover; while stops are being edited it reads "Stop editing" and shows pressed, the button as wide in both states so the row never wraps differently, T-2525, T-2601), Copy line (duplicates route and settings with no trains, T-1161;
+- **Actions** at the top, under the title and the planned or broken notice: Edit stops (hover; while stops are being edited it reads "Stop editing" and shows pressed, the button as wide in both states so the row never wraps differently, T-2525, T-2601), Copy line (duplicates route and settings with the service of a new line of its kind in every period, none where no default is set, T-1161, T-3834;
   the copy joins its source's group, making one of the
   two when the source had none, T-1791, and the copy's own panel opens with its stops being edited, T-1894; its name and symbol are the next
   letter after a trailing number ("Line 1" and symbol 1 give "Line 1a" and 1a, then 1b), else
@@ -303,9 +320,8 @@ purpose filter the purpose drawn is ringed in the bar.
 - **Sections**, in order: Schedule (trains for each demand level, with the resulting headway;
   [track-and-service.md](track-and-service.md) 6.3; columns Demand, Trains and Headway, every
   cell one line, the Demand column cut with an ellipsis when short of room [T-692]; beside the
-  heading small muted icon buttons [T-3543]: on a running rail line the **timetable chart** (below, hover "Show timetable chart" /
-  "Hide timetable chart", pressed while open) and, a size bigger (24 px), the **schedule panel** (hover "Detailed
-  schedule", [ui-panels.md](ui-panels.md#schedule-panel), T-3346); each level's count or headway is set on its own, a new line's included (T-2123 took
+  heading a muted icon button (26 px) [T-3543]: the **schedule panel** (hover "Detailed
+  schedule", [ui-panels.md](ui-panels.md#schedule-panel), T-3346), which holds the timetable and its chart (below); each level's count or headway is set on its own, a new line's included (T-2123 took
   back T-2092's fill of every level; the tutorial asks for trains at each level instead); a Trains / Headway switch in the heading
   chooses what the player sets [T-625]: with Trains a click on the count types it (Enter or leaving applies, Escape cancels, a loop's rounded up to even) [T-3152]. A count is raised to at most one train (a loop's two) more than the whole trains the line's track lets run at that level (the round trip over its shortest headway, `limits`; a loop's even, one at least; `trainCap`) and 1000, so one train is held and the held messages, the issue and the red headway show: a plus or a typed number at or past that is refused with the shake and the refusal knock, a typed number above it sets the cap and shakes, and the plus's hover says what limits the line. Lowering is free. When a game loads, a count past the cap is lowered to it (`game/capLoad.ts`); a cap that falls later, from a track edit, leaves the count, red with the held-out alert, until it is lowered [T-3165]; with Headway the headway column holds a stepper (steps to
   the whole minute above or below, so 5.37 min goes to 6 or 5 and 5 min to 6 or 4; none, or 1 to 240
@@ -476,27 +492,20 @@ The stops (above Schedule while being edited [T-670]),
 
 #### The timetable chart
 
-[T-2603, T-2660, T-2665, `ui/inspector/MareyChart.tsx`, `ui/inspector/mareyShare.ts`, notes/T-2603.md,
-notes/T-2660.md] A Marey chart of the selected rail line, in a panel over the map at the dock's foot (on
-a phone, just above the dock): the line's chip and name, the other lines toggle (below), a close button
-(hover "Close"), and the chart. Time runs across, 600 px wide, on the line's own local clock (ticks
-every 5, 10, 15, 30, 60, 120, 180 or 240 minutes, the first giving at most 8); the stops run down by
+[T-2603, T-2660, T-3817, `ui/inspector/MareyChart.tsx`, `ui/inspector/mareyShare.ts`, notes/T-2603.md,
+notes/T-2660.md, notes/T-3817.md] A Marey chart of a rail line, drawn only in the schedule panel under its
+timetable, on the timetable's time axis: its zoom and scroll are the table's
+([ui-panels.md](ui-panels.md#schedule-panel)). Time runs across on the line's own local clock (ticks every
+5, 10, 15, 30, 60, 120, 180 or 240 minutes, the first giving at most 8 across the view); the stops run down by
 their distance along the line (run 0's offsets, run 1's mapped through the stops both share), north up
-as the stops list (the top-down rule, `drawnReversed`, not T-2661's left-to-right one), 20 px a stop
-between 120 and 340 px, a grey rule at each stop and its name at the left where it clears the name
-above by 12 px (the ends always). The span is by default 2 round trips or 3 of the longest headway, at
-least 2 hours; on a busy line no more than 12 of its shortest headways or half a round trip (one trip
-end to end), whichever is longer, and at least half an hour; at most 8 hours; in whole quarter hours [T-2665].
-The mouse wheel over the chart zooms it out (down) or in (up), 1.25 times a notch, from a quarter hour
-to 24 hours, kept until another line is shown. A quarter of the span is before now; it moves with the
-clock, the past under a half veil and now a line in the accent colour; not scrollable.
+as the stops list (the top-down rule, `drawnReversed`, not T-2661's left-to-right one), a grey rule at
+each stop and its name at the left where it clears the name above by 12 px (the ends always). The past
+is under a half veil and now is a line in the accent colour.
 Each trip the map draws (`TrackApi.line_trips`, the same departures, ends and hand-overs as
-`trips`; the timetable, without the display guard's lag) is a line in the line's colour, both
-directions alike, curved as its run profile goes (speeding up, slowing, standing at stops), then a
-dashed line at the terminal while its train stands for its next departure. Hover on a trip thickens it
-and names its ends: "Leaves Ash 08:12", "Reaches Gum 08:28". It follows the selected line; it closes
-with its button, the close button, Esc (unless a centred panel is open over it, which takes the Esc), or when no
-rail line is selected. The schedule panel draws the same chart at its own width ([ui-panels.md](ui-panels.md#schedule-panel)).
+`trips`; the timetable, without the display guard's lag) is a line in the line's colour, curved as its
+run profile goes (speeding up, slowing, standing at stops), then a dashed line at the terminal while its
+train stands for its next departure. Hover on a trip thickens it and names its ends: "Leaves Ash 08:12",
+"Reaches Gum 08:28".
 
 **Other lines** [T-2660]: every other rail line that runs over the line's track has its trains drawn
 on the stretches they share, mapped onto this line's distance through the track both use (direction
@@ -515,10 +524,11 @@ to draw) hides the other lines' trains and dots but not the rules; on at first, 
 device with the display settings (`chartOtherLines`). Their trips are asked for the same window as
 the line's, one `lineTrips` query a line.
 
-The trips are asked for a quarter span either side and again as now enters the next quarter, the span
-changes or the network changes. The time ticks and every train are one SVG layer built once per
-answer and moved by a CSS transform as the clock runs, so a new minute redraws only the time labels,
-the veil and the now line; each profile's curve is one SVG path reused by every trip on it.
+The trips are the table's: one `lineTrips` question a line over the table's day (from two hours before
+it), asked again only as the hour turns or the network changes, never as the view zooms or scrolls
+(T-3817). The trains are drawn on a canvas, each profile's curve made once per answer and placed and
+stretched to the view on each redraw, only the trips in view; the ticks, labels, veil and now line are
+SVG over and under it.
 
 #### The round trip
 
@@ -542,7 +552,8 @@ The round trip split into running, dwell, turning and waiting,
   second is left out when every station is an end station, and a button is disabled once none is
   missing, its hover saying so ("The end stations already have parking") [T-2692]. A refusal
   shakes the button and the notice says why. A **loop** [T-798] has a Direction row first, a segmented
-  One way (hover "The way the route was drawn") or Both ways [T-2981], then its lap (one way around, both ways the longer way's)
+  One way (hover "The way the route was drawn") or Both ways [T-2981], Both ways greyed out with the hover "Part of this
+  loop's track runs one way" while one-way track lets it around only one way [T-3835], then its lap (one way around, both ways the longer way's)
   in place of the round trip, split the same way, with no turning row for a circle and "Turning at
   the end" for a balloon; its average speed is once round over the lap (a balloon's less its
   turning); run both ways, its trains steppers move by 2 and the count's hover says how many run each way; the
@@ -667,7 +678,8 @@ schedule and counts block are the line panel's own parts (`LineTitle.tsx`, `sche
 buses: buses or a headway per demand level with the same hovers, the crowding dots, beside the heading the
 schedule panel button of a running line (its weekends and new bus lines' headways, no board or timetable chart,
 [ui-panels.md](ui-panels.md#schedule-panel), T-3703; no chart toggle), the waiting
-spinner on a level with buses while demand loads, and the average speed; no track limits (T-2919). Stops: the ends and the
+spinner on a level with buses while demand loads, a BRT box (T-3907; its hover the floor, the price a km in town with
+the route's km in town, and the upkeep a km there), and the average speed; no track limits (T-2919). Stops: the ends and the
 train stations met, the street stops between folded into one row each, in the line panel's order (north or
 west end on top) with its stop times (the time from the stop on top after each name, "12m30s").
 The counts block, headingless as the line panel's: riders by purpose, Changing to trains (riders a day changing between this bus and any rail
@@ -681,7 +693,9 @@ the Build tab's quote has rows for bus routes and new buses.
 **A ferry line's panel** (T-2194) is the same panel in boats: Edit route opens the ferry tool on its
 ports (ui-building.md, "Drawing a ferry line"); Delete line removes it at once (its ports stay, its
 boats go to the depot, and it is undoable); while planned, Construct's hover gives the ports and the
-boats. Schedule in boats. The ports list, headed Ports, is a rail line's stops strip (T-2275): a
+boats. Schedule in boats. Above the average speed, a Boat row picks the boat size, Small, Medium or Large (T-3892,
+track-and-service.md 6.9), each option's hover its riders and top speed and, on a running line, what switching buys
+(the train type's rule). The ports list, headed Ports, is a rail line's stops strip (T-2275): a
 port's dot, its name and the time from the port on top (north or west end on top), the bullets met and its
 boardings today (T-2919); in the Traffic view each stretch as wide as its
 riders against the line's busiest, its hover "A to B" and the riders a day, as a rail line's (T-2274).
@@ -697,10 +711,28 @@ and Riders left at platform (a port keeps a waiting crowd, T-2919); then the rou
 named "boat", its On board against two cars (88 seats, 320 at the rated load, 480 at crush), "Typical
 boat this hour" (a bus's "Typical bus this hour"). A port's panel is a station's: "Port" under its
 name, no platform length and one upgrade, the Waiting room (T-3419; waits for a boat count 0.8, as at a station), its upkeep a port's (US$10k a game day), Construct port and
-Remove port. The Money tab shows boats owned, needed and spare once there are any, and a **Ferry**
-fare row under High speed once a ferry line exists (a stepper by 0.05, 1.00x by default, a button back
-to 1.00x once set, saved with the game; a change solves demand again, T-2195). The Build tab's quote
+Remove port. The Money tab shows boats owned, needed and spare once there are any (T-3892: a set of rows per boat size,
+named by size, "Small boats owned", unless Medium is the only one), and a ferry fare row per boat size in use under High
+speed, **Small ferry**, **Ferry** (Medium) and **Large ferry** (a stepper by 0.05, 1.50x, 1.00x and 1.00x by default, a button
+back to the default once set, saved with the game; a change solves demand again, T-2195). The Build tab's quote
 has rows for ports, new boats and the ferry route (free).
+
+**A bus stop's panel** (T-2949, T-3890; `ui/inspector/BusStopInspector.tsx`) opens on a click on any stop
+demand sees (an end, a station's, a crossing's or one between; a street stop selects its line), made of the
+station panel's parts. A train station's stop opens the station's panel instead. Its scope is the stop's
+place: the stops of other bus lines and the train stations within demand's 100 m merge, chained
+(`busPlaces` in `game/busLinks.ts`, as the kernel's `merge_stations`; never two stops of one line). Its title
+is the stop's name (the nearest station within 1 km, "Bus stop near X", else "Bus stop") with Show on the map; under it, grey, "2 lines stop
+here" when more than one line stops at the place, and "At X", a button opening the train station there, when
+one is. Blueprint while its line is planned. Lines: every bus and train line stopping at the place, each with
+its boardings there today, a click selecting the line; then the station panel's boardings today with the
+purpose split and its riders waiting now. Change on foot: the places and train stations within demand's 300 m
+change walk (`xfer_walk_m`) with a line this place has not, nearest first, at most 8, each its name, its
+lines' badges and the straight distance ("150 m"); a click opens it. Last, "Build a station here" picks the
+Station tool, opens the Build tab and moves the map to the stop; a station still goes only on track. The
+stop's place is lit on the map while selected (below), and the selection follows the stop when an edit
+places the stops again (the stop nearest where it was, within 60 m, the same id winning a tie, or the
+station's panel once it is a station's stop).
 ## Trains
 
 - **The train inspector's "On board"** [T-083, T-164, T-230]: this train's own riders on the stretch
@@ -888,14 +920,18 @@ order, kept and dropped as the Lines tab's is [T-1813]. Riders follows the rider
   one names it alone (alone in its complex, its stored name too, so a complex it forms later is called
   that). The complex view's title, and a Stations tab row of a complex, show and rename the complex's
   name, which unbound stations keep out of (the worker resolves every rename: `renameStation`,
-  `renameComplex` in `workers/clock.worker.ts`). A station opened on its own from its complex's list,
+  `renameComplex` in `workers/clockDemand.ts`). A station opened on its own from its complex's list,
   in a complex of several, has a toggle beside its name (link icon, hover "Use the complex's name",
   lit while bound): unbinding shows its stored name again, binding shows the complex's; each is one
   undo. New stations start bound while Settings, Game "Name new stations after their complex" is ticked
-  (on by default; the player's own, remembered in the browser and used in every game,
-  `DisplaySettings.bindNew`); a change applies to stations placed from then on. Ticking it while some stations are unbound asks "Name existing stations after their
-  complex too?" ("Rename all stations" binds every station, one undo; "Only new stations" or Escape
-  leaves them). The map labels every distinct name a complex's stations show. A line group's name
+  (the player's own, remembered in the browser and used in every game, `DisplaySettings.bindNew`; off for
+  a new player, a browser with no settings stored, and on for one with settings stored from before it was
+  chosen, the old default) [T-3814]; a change applies to stations placed from then on. Changing it in a
+  game with any station asks first, both ways, in a dialog with no "Confirm?" heading ("Make new stations
+  named after their complex, or also rename all existing stations after their complex?" ticking, "Make new
+  stations named independently, ..." unticking): Cancel, Escape or a click outside leaves the setting; "Apply to new stations only" changes
+  only the setting; "Rename all stations" changes it and binds or unbinds every station (each keeping the
+  name it shows), one undo, which leaves the setting as chosen. The map labels every distinct name a complex's stations show. A line group's name
   typed in its title stays even when it equals its first line's name.
 
 ## The complex map
@@ -1081,8 +1117,12 @@ title is "Trip" with no line under it naming the ends: the map marks them [T-125
   to and from the stations, muted, since the market knows no single walk), Fare, Time (station to
   station), then [T-1902] "Trips possible by train" (the share of the trips on pairs with a
   station in reach at both ends; no hover), Effective time (the pairs' felt cost, averaged over the
-  pairs the train serves and their riders' income groups; no hover, since an average over pairs has
-  no one equation), then "Car on the same trips" (or "Plane", or "Car or plane" where the plane has
+  pairs the train serves by all their trips, not their riders, and over their income groups; its
+  hover is the main route's own equation [T-3404], ending at that route's sum, then "The sum is this
+  route's own. The effective time is averaged over the 6 km areas at the two ends, by their trips."
+  [T-3822]; the routes' first ride waits the planned time the market costs it at [T-3823, T-1430:
+  the least of half the headway, 5 minutes plus a sixth of it, and 30; `plannedFirstWait` in `game/trip.ts`],
+  in the rows, the equation, Time and the other routes' hovers), then "Car on the same trips" (or "Plane", or "Car or plane" where the plane has
   0.5% of the trips or more: the other ways as the choice weighs them together, the reference minus
   ln(rest) over the scale, over the same pairs and riders; hover "Effective time by car on trips
   possible by train."), so the train's share reads as its share of the trips possible by train
@@ -1172,11 +1212,15 @@ title is "Trip" with no line under it naming the ends: the map marks them [T-125
   after the fare, "transfer fare $1.00 × 3", where the route changes and one is set [T-1801], two
   changes or more as "changes 2 × 2" [T-717]; a drive to the station is its parts [T-915],
   "Starting the drive 15 + drive 9.2 × 2.66 + parking at the station 7 + parking at home 3 + car
-  $2.85 × 3", or "drop-off 10" where that is cheaper than parking; the
-  last term is what the model's pooled figure, over every station and route people use, is below
-  this route's sum, so the equation always adds to the row, and one plain line under the equation
-  says choice of routes is the time saved by having several ways to go; the terms are the worker's
-  perceived minutes, `routeTerms` in `game/trip.ts`), then one sentence with the share of the
+  $2.85 × 3", or "drop-off 10" where that is cheaper than parking; then two terms take the
+  route's sum to the row, so the equation always adds up [T-3822]: **first train to come** (bus,
+  tram, boat or ride by the route's vehicles), its station pair's cost less the route's sum, plus
+  or minus, since the pair's strategy is the expected cost over whichever useful departure comes
+  first; and **choice of routes**, the model's logsum over every station pair people use less that
+  pair's cost, never a plus. Each shows from 0.05 min, with one plain line under the equation
+  ("People board the first train to come, so some ride other routes from the same stations.",
+  "Choice of routes is the time saved by having several ways to go."); the terms are the worker's
+  perceived minutes, `routeTerms` and `pairCost` in `game/trip.ts`), then one sentence with the share of the
   trip's train users on the route and the same trains from other platforms or walks added ("65% of
   train users between these places take this exact route."), with up to four
   "Other routes" and their shares, then a "Smaller routes" row with what is left [T-709]; the

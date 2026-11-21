@@ -66,6 +66,7 @@ import { touchInput, watchInput } from "./map/touch";
 import { TouchBar } from "./ui/TouchBar";
 import { StopMarkers } from "./map/stopMarkers";
 import { BusStopMarkers } from "./map/busStops";
+import { busPlaceOf } from "./game/busLinks";
 import { EdgeEditor } from "./map/edgeEdit";
 import { BlueprintBox } from "./map/blueprintBox";
 import { FareZoneTool } from "./map/fareZoneTool";
@@ -116,8 +117,8 @@ import { choiceFromUrl, showStartMenu, START_LOGO, worldCover } from "./ui/Start
 import { viewStart } from "./ui/locate";
 import { enterGame, fitAhead, startOpenFit } from "./ui/locate";
 import { realmsAhead } from "./game/realms";
-import { ClockClient, clockWorkerStatus, manageSaveSlot, onNetAhead, onNetworkSnapshot, onStationsAhead, retryGround } from "./workers/clockClient";
-import { demandStuckSince, netAhead, retryPackDownloads, startDemand, stationsAhead, submitNetwork } from "./workers/demandClient";
+import { ClockClient, clockWorkerStatus, manageSaveSlot, onNetAhead, onNetworkSnapshot, onSaveRoom, onStationsAhead, retryGround } from "./workers/clockClient";
+import { demandStuckSince, netAhead, retryPackDownloads, saveRoom, startDemand, stationsAhead, submitNetwork } from "./workers/demandClient";
 import { startDemandViews, viewStats } from "./map/demandViews";
 import { startTripView } from "./map/tripView";
 import { modeColours } from "./game/palette";
@@ -291,6 +292,8 @@ const overlay = new Overlay(map, renderer, () => {
     hotEdge: hot().edge,
     hotStations: n ? hot().stations.map((id) => stationIndexOf(n, id)) : [],
     hotBuses: hot().buses,
+    // T-3890: the hovered stop's place, and the selected stop's
+    hotStops: [...hot().stops, ...(sel?.kind === "busStop" && world.peek() ? busPlaceOf(world.peek()!, Number(sel.stop))?.stops.map((s) => s.id) ?? [] : [])],
     lineScale: d.lineWidth, // T-1248
   };
 });
@@ -436,7 +439,7 @@ const buildAbove = (x: number, y: number) => isBuildTool(tool.peek()) && (tools.
 // T-1515 (Anita): with the select tool a line, bus line, station or train within its own reach is
 // picked over a demand bubble drawn above it, for clicks and hovers alike; a bubble keeps its wider
 // reach (MIN_PICK_PX, bubblePad) only where none of those is near
-const NET_FIRST = new Set(["line", "station", "train"]);
+const NET_FIRST = new Set(["line", "station", "train", "busStop"]);
 let netFirstAt = { x: NaN, y: NaN, t: 0, hit: false };
 const netFirst = (x: number, y: number) => {
   if (tool.peek() !== "select" || linking.peek() !== null) return false;
@@ -624,6 +627,13 @@ if (!SYNTH && !perfOff("hover")) // ?perfOff=hover: T-045 measurement only
       return;
     }
     if (tool.peek() === "blueprint" || tool.peek() === "fares") return;
+    if (tool.peek() === "track") {
+      tools.move(e);
+      // T-3897: a blueprint point drags with the track tool too
+      const c = nodeDrag.hit(e.point.x, e.point.y)?.movable ? "grab" : "crosshair";
+      if (map.getCanvas().style.cursor !== c) map.getCanvas().style.cursor = c;
+      return;
+    }
     if (tool.peek() !== "select") return tools.move(e);
     // a blueprint point drags even over a demand bubble (T-474), so its grab cursor comes first
     const cur = linking.peek() !== null ? (pick(overlay, e.point.x, e.point.y, false)?.kind === "station" ? "pointer" : "crosshair") : nodeDrag.hit(e.point.x, e.point.y)?.movable ? "grab" : demandHover?.(e.point.x, e.point.y) ? "pointer" : pick(overlay, e.point.x, e.point.y, display.peek().trains) ? "pointer" : "";
@@ -795,6 +805,7 @@ render(h(ToolNotes, null), document.getElementById("tools-root")!);
 
 // ---- demand (the pool started at the top, or with the pick) ----
 onNetworkSnapshot(submitNetwork);
+onSaveRoom(saveRoom); // T-3869
 onStationsAhead((frame, xy, fine, built, home) => {
   stationsAhead(frame, xy, fine, built);
   // T-1539: the camera on the loading save's network now, so its cached figures can show before it is worked out

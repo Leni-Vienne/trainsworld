@@ -71,6 +71,10 @@ export interface StationInput {
   onePlatform?: true;
 }
 
+/** T-3423: a group around a line's own group: its number, name ("" for its oldest line's) and bullet
+ * text and colour set by hand ("" for none) */
+export interface OuterGroup { group: number; name: string; symbol: string; colour: string }
+
 export interface LineInput {
   id: LineId;
   num: number;
@@ -96,6 +100,8 @@ export interface LineInput {
   /** T-1813: the group's bullet text and colour set by hand, absent or "" for none */
   groupSymbol?: string;
   groupColour?: string;
+  /** T-3423: the groups `group` sits in, nearest first; absent for none */
+  outer?: OuterGroup[];
   /** T-3333: the hidden twin of a line run on both pairs of quad track, the line it runs the other pair
    * for: in every sum, never in a list (`listedLines`) */
   twinOf?: LineId;
@@ -132,6 +138,8 @@ export interface TrackEdge {
   vminKmh: number;
   /** T-3405: the player's speed limit on it, km/h; absent for none */
   limit?: number;
+  /** T-3893: the ramp length per level its ramps aim for, m; absent for the default. Pieces join only when equal. */
+  ramp?: number;
   levelMin: Level;
   levelMax: Level;
   /** lines whose path uses it */
@@ -249,6 +257,8 @@ export interface LineStats {
   loop: "circle" | "balloon" | null;
   /** T-2981: a loop that runs one way, round in the direction it was drawn, with all its trains */
   oneWay: boolean;
+  /** T-3835: set both ways, it runs one way, as one-way track takes it round only one way */
+  oneWayByTrack?: true;
   /** T-2987: the player's speed limit for the line's trains, km/h; 0 for none */
   limit: number;
   /** T-3758: its rides pay the distance fare where the game has fare zones; absent: zone fares */
@@ -378,8 +388,9 @@ export type Selection =
   | { kind: "line"; line: LineId }
   /** a line group's view (T-1791): its group number */
   | { kind: "group"; group: number }
-  /** T-2949: a stop that two or more bus lines share: their ids, and the id of one of its stops (its name) */
-  | { kind: "busStop"; lines: LineId[]; stop: string }
+  /** T-2949, T-3890: a bus stop that is no train station's: its id and where it is drawn (stops are placed
+   * again on every edit, so the panel finds it again by place) */
+  | { kind: "busStop"; stop: string; at: [number, number] }
   | { kind: "station"; station: StationId }
   | { kind: "track"; edge: EdgeId }
   | { kind: "junction"; node: NodeId }

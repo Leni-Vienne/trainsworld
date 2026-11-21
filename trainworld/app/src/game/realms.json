@@ -1,8 +1,8 @@
 {
   "realms": [
     { "id": "uk-ie", "name": "UK and Ireland", "countries": ["GB", "IE", "IM", "JE", "GG"] },
-    { "id": "france", "name": "France", "countries": ["FR", "MC", "AD"] },
-    { "id": "benelux", "name": "Benelux", "countries": ["BE", "NL", "LU"] },
+    { "id": "france", "name": "France", "countries": ["MC", "AD"], "units": { "FR": "*" } },
+    { "id": "benelux", "name": "Benelux", "countries": ["BE", "LU"], "units": { "NL": "*" } },
     { "id": "germany", "name": "Germany", "countries": ["DE"] },
     { "id": "ch-at", "name": "Switzerland and Austria", "countries": ["CH", "AT", "LI"] },
     { "id": "italy", "name": "Italy", "countries": ["IT", "MT", "SM", "VA"] },
@@ -29,6 +29,8 @@
     { "id": "thailand", "name": "Thailand", "countries": ["TH"] },
     { "id": "singapore", "name": "Singapore", "countries": ["SG"] },
     { "id": "cambodia", "name": "Cambodia", "countries": ["KH"] },
+    { "id": "laos", "name": "Laos", "countries": ["LA"] },
+    { "id": "myanmar", "name": "Myanmar", "countries": ["MM"] },
     { "id": "malaysia", "name": "Peninsular Malaysia", "units": { "MY": "*" } },
     { "id": "borneo", "name": "Borneo", "countries": ["BN"], "units": {
       "MY": ["Sabah", "Sarawak", "Labuan"],
@@ -40,6 +42,7 @@
     { "id": "sulawesi", "name": "Sulawesi", "units": { "ID": [
       "North Sulawesi", "Gorontalo", "Central Sulawesi", "West Sulawesi", "South Sulawesi", "Southeast Sulawesi"] } },
     { "id": "id-east", "name": "Eastern Indonesia", "units": { "ID": "*" } },
+    { "id": "timor-leste", "name": "Timor-Leste", "countries": ["TL"] },
     { "id": "visayas", "name": "Visayas", "units": { "PH": ["Western Visayas", "Central Visayas", "Eastern Visayas"] } },
     { "id": "mindanao", "name": "Mindanao", "units": { "PH": [
       "Zamboanga Peninsula", "Northern Mindanao", "Davao Region", "Soccsksargen", "Caraga", "ARMM"] } },
@@ -69,6 +72,10 @@
     { "id": "ecuador", "name": "Ecuador", "countries": ["EC"] },
     { "id": "southern-africa", "name": "Southern Africa", "countries": ["ZA", "LS", "SZ"] },
     { "id": "saudi-arabia", "name": "Saudi Arabia", "countries": ["SA"] },
+    { "id": "iraq", "name": "Iraq", "countries": ["IQ"] },
+    { "id": "iran", "name": "Iran", "countries": ["IR"] },
+    { "id": "pakistan", "name": "Pakistan", "countries": ["PK"] },
+    { "id": "bangladesh", "name": "Bangladesh", "countries": ["BD"] },
     { "id": "gulf", "name": "Gulf states", "countries": ["AE", "QA", "BH", "KW", "OM"] },
     { "id": "in-north", "name": "North India", "units": { "IN": [
       "Jammu and Kashmir", "Ladakh", "Himachal Pradesh", "Punjab", "Chandigarh", "Haryana", "Delhi", "Rajasthan"] } },
@@ -88,7 +95,10 @@
     { "id": "venezuela", "name": "Venezuela", "countries": ["VE"] },
     { "id": "cuba", "name": "Cuba", "countries": ["CU"] },
     { "id": "hispaniola", "name": "Hispaniola", "countries": ["DO", "HT"] },
-    { "id": "caribbean", "name": "Caribbean", "countries": ["JM", "TT", "BS", "BB", "LC", "CW", "GD", "VC", "AW", "AG", "DM", "KY"] },
+    { "id": "caribbean", "name": "Caribbean", "countries": ["JM", "TT", "BS", "BB", "LC", "CW", "GD", "VC", "AW", "AG", "DM", "KY",
+      "VI", "VG", "AI", "SX", "MF", "BL", "KN", "MS", "TC"],
+      "units": { "FR": ["Guadeloupe", "Martinique"], "NL": ["Caribbean Netherlands"] } },
+    { "id": "guianas", "name": "Guianas", "countries": ["GY", "SR"], "units": { "FR": ["Guyane"] } },
     { "id": "bolivia", "name": "Bolivia", "countries": ["BO"] },
     { "id": "paraguay", "name": "Paraguay", "countries": ["PY"] }
   ]

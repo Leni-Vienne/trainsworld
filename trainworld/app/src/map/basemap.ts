@@ -15,8 +15,7 @@ import { signal } from "@preact/signals";
 import { SHADES, type ShadeColours } from "../game/shades";
 import { display, SAT_INK_FLIP, shade, type Shade } from "../game/ui";
 import { styleUp } from "./styleReady";
-import { busRoadFilter, railRoadFilter } from "./busRoads";
-import { demBytes, flattenDem, onRedraw } from "./demFlat";
+import { busRoadFilter, fastRoadExpr, railRoadFilter } from "./busRoads";import { demBytes, flattenDem, onRedraw } from "./demFlat";
 import { canvasReadsTrue } from "./canvasRead";
 
 const POSITRON = "https://tiles.openfreemap.org/styles/positron";
@@ -365,6 +364,7 @@ function restyle(style: maplibregl.StyleSpecification): maplibregl.StyleSpecific
       if (layout["text-field"] !== undefined) {
         layout["text-font"] = FONT;
         layout["text-field"] = guardEnglishName(layout["text-field"]);
+        if ((layout["symbol-placement"] ?? "point") === "point") layout["text-field"] = guardWrapMarks(layout["text-field"]);
         // T-1692: plain one-colour text, no halo (a halo in the land colour shows as an outline over shade)
         paint["text-halo-width"] = 0;
         L["text-color"] = placeNameInk("light");
@@ -515,6 +515,35 @@ function guardEnglishName(e: unknown): unknown {
   return e.map(guardEnglishName);
 }
 
+/**
+ * T-3842: spacing marks that MapLibre 6.13-6.19 joins to the letter before only when the text around them holds some
+ * other mark (its `textCanContainGraphemeClusters` leaves them out, `canCombineGraphemes` takes every gc=Mc). A
+ * wrapped label whose line holds these but no such other mark is re-split into more clusters than it had sections
+ * for, and the worker throws ("Cannot use 'in' operator to search for 'imageName'"), losing the whole tile: roads,
+ * water and all. Mostly Burmese (aa, visarga), Shan and Karen tones; Tai Tham, Myanmar Extended-A and Ahom too.
+ * Myanmar's letters are in the list as well, so every Myanmar-script name goes the same way: Burmese is in nearly
+ * every name with those marks, and villages with and without their Burmese line would read as a fault.
+ */
+const WRAP_MARKS = [
+  [0x102b, 0x102c], [0x1038, 0x1038], [0x1062, 0x1064], [0x1067, 0x106d], [0x1083, 0x1083], [0x1087, 0x108c],
+  [0x108f, 0x108f], [0x109a, 0x109c], [0x1a61, 0x1a61], [0x1a63, 0x1a64], [0xaa7b, 0xaa7b], [0xaa7d, 0xaa7d],
+  [0x11720, 0x11721],
+  // Myanmar letters: Burmese, Pali, Mon, Karen, Shan, Palaung
+  [0x1000, 0x102a], [0x103f, 0x103f], [0x1050, 0x1055], [0x105a, 0x105d], [0x1061, 0x1061], [0x1065, 0x1066],
+  [0x106e, 0x1070], [0x1075, 0x1081], [0x108e, 0x108e],
+].flatMap(([a, b]) => Array.from({ length: b - a + 1 }, (_, i) => String.fromCodePoint(a + i)));
+const hasWrapMark = (s: unknown) => ["any", ...WRAP_MARKS.map((c) => ["in", c, s])];
+
+/** T-3842: a point label whose place name holds one of those shows its Latin name alone, or no name where it has
+ * none. Only point labels wrap; a line label is laid out as one line. Tested on the `name` property, not the label
+ * text: a `var` is evaluated afresh at every use, so testing a bound label would build it once per character. */
+function guardWrapMarks(field: unknown): unknown {
+  const latin = ["coalesce", ["get", "name:latin"], ""];
+  return ["case", hasWrapMark(["coalesce", ["get", "name"], ""]),
+    ["case", hasWrapMark(latin), "", latin],
+    field];
+}
+
 /** T-1270: the hillshade on or off (and the water drawn over it with it); the shade never on the lighter map. */
 export function setHillshade(map: maplibregl.Map, on: boolean) {
   hillshadeOn = on;
@@ -528,17 +557,17 @@ let hillshadeOn = false;
 /** T-2883: in bus placing mode, the roads a bus may drive are tinted faintly over the basemap's own
  * roads, and a one-way street gets arrows pointing the way traffic runs; T-2998: with Tram in the track
  * tool and the street snap on, the streets a tram may follow, in green. Colour light, dark, opacity light, dark. */
-const ONEWAY_ARROW = "bus-oneway-arrow";
+const ONEWAY_ARROW = "bus-oneway-arrow", ONEWAY_ARROW_FAST = "bus-oneway-arrow-fast";
 const ONEWAY_LAYER = "bus_roads_oneway";
 /** A chevron pointing right, the direction `symbol-placement: line` treats as forward along the road. */
-function onewayArrow(dark: boolean): { width: number; height: number; data: Uint8ClampedArray } {
+function onewayArrow(colour: string): { width: number; height: number; data: Uint8ClampedArray } {
   const s = 32;
-  if (!canvasReadsTrue()) return { width: s, height: s, data: chevronPixels(s, dark ? [0x3f, 0xd0, 0xc4] : [0x1a, 0x9e, 0x94]) };
+  if (!canvasReadsTrue()) return { width: s, height: s, data: chevronPixels(s, [1, 3, 5].map((i) => parseInt(colour.slice(i, i + 2), 16))) };
   const canvas = document.createElement("canvas");
   canvas.width = canvas.height = s;
   const g = canvas.getContext("2d", { willReadFrequently: true })!;
   g.clearRect(0, 0, s, s);
-  g.strokeStyle = dark ? "#3fd0c4" : "#1a9e94";
+  g.strokeStyle = colour;
   g.lineWidth = 3.5;
   g.lineCap = "butt";
   g.lineJoin = "miter";
@@ -574,16 +603,19 @@ function chevronPixels(s: number, [r, g, b]: number[]): Uint8ClampedArray {
     }
   return px;
 }
+/** the arrows in the hint's colours: its teal, and on a fast road its blue */
 function ensureOnewayArrow(map: maplibregl.Map, dark: boolean) {
-  const image = onewayArrow(dark);
-  if (map.hasImage(ONEWAY_ARROW)) map.updateImage(ONEWAY_ARROW, image);
-  else map.addImage(ONEWAY_ARROW, image);
+  for (const [id, colour] of [[ONEWAY_ARROW, ROAD_HINTS.bus.colour[+dark]], [ONEWAY_ARROW_FAST, BUS_FAST_COLOUR[+dark]]]) {
+    const image = onewayArrow(colour);
+    if (map.hasImage(id)) map.updateImage(id, image);
+    else map.addImage(id, image);
+  }
 }
 const ROAD_HINTS = {
   // T-3014: both a quarter wider and from a zoom further out (the road tiles carry the minor streets from 12, so
   // at 11 the hint is the major ones)
   bus: { id: "bus_roads_hint", filter: () => busRoadFilter(), colour: ["#1a9e94", "#3fd0c4"], opacity: [0.55, 0.38], minzoom: 11, width: 1.25 },
-  tram: { id: "tram_roads_hint", filter: () => busRoadFilter(false), colour: ["#3f9a1c", "#86d65a"], opacity: [0.55, 0.38], minzoom: 11, width: 1.25 },
+  tram: { id: "tram_roads_hint", filter: () => busRoadFilter(), colour: ["#3f9a1c", "#86d65a"], opacity: [0.55, 0.38], minzoom: 11, width: 1.25 },
   // T-3129: the main roads rail track snaps to
   rail: { id: "rail_roads_hint", filter: () => railRoadFilter(), colour: ["#c2661a", "#f0a050"], opacity: [0.6, 0.45], minzoom: 9, width: 1.5 },
 } as const;
@@ -605,6 +637,25 @@ export function setRailRoadHint(map: maplibregl.Map, on: boolean) {
 function repaintRoadHints(map: maplibregl.Map) {
   for (const k of Object.keys(hintOn) as RoadHint[]) if (hintOn[k]) setRoadHint(map, k, true);
 }
+/** T-3829 (Anita picked it from three): the bus hint draws the roads a bus runs fastest on (`fastRoadExpr`) in
+ * blue, a little wider, the other roads in its teal. */
+const BUS_FAST_COLOUR = ["#3a4fb0", "#a6bcff"], BUS_FAST_OPACITY = [0.85, 0.9], BUS_FAST_WIDTH = 1.2;
+/** T-3901: the bus hint's colour of a fast or an ordinary road in the current shade, for a speed tag over it */
+export function busRoadColour(fast: boolean): string {
+  const dark = shadeAs[0] === "dark" ? 1 : 0;
+  return fast ? BUS_FAST_COLOUR[dark] : ROAD_HINTS.bus.colour[dark];
+}
+/** the hint's width at each zoom, `mul` times (a number or a per-road expression) */
+const hintWidth = (w: number, mul: unknown = 1) =>
+  zoomWidth(11, 0.4 * w, 12, 0.5 * w, 14, w, 16, 2.5 * w, 20, 10 * w).map((s, i) => (i >= 4 && i % 2 === 0 && mul !== 1 ? ["*", s, mul] : s));
+const byFast = (fast: unknown, slow: unknown) => ["case", fastRoadExpr(), fast, slow];
+/** the hint's paint, with `mul` its width per road over the plain hint's (the one-way arrows follow it) */
+function hintPaint(kind: RoadHint, dark: 0 | 1): { colour: unknown; opacity: unknown; width: unknown; mul: unknown } {
+  const h = ROAD_HINTS[kind];
+  if (kind !== "bus") return { colour: h.colour[dark], opacity: h.opacity[dark], width: hintWidth(h.width), mul: 1 };
+  const mul = byFast(BUS_FAST_WIDTH, 1);
+  return { colour: byFast(BUS_FAST_COLOUR[dark], h.colour[dark]), opacity: byFast(BUS_FAST_OPACITY[dark], h.opacity[dark]), width: hintWidth(h.width, mul), mul };
+}
 function setRoadHint(map: maplibregl.Map, kind: RoadHint, on: boolean) {
   hintOn[kind] = on;
   if (!styleUp(map)) return;
@@ -616,21 +667,22 @@ function setRoadHint(map: maplibregl.Map, kind: RoadHint, on: boolean) {
   }
   const style = map.getStyle();
   if (!style || !map.getLayer("highway_minor") || !map.getSource(VECTOR_SOURCE)) return;
-  const colour = h.colour[dark], opacity = h.opacity[dark];
+  const p = hintPaint(kind, dark);
   const before = style.layers.find((l) => l.type === "symbol")?.id;
   if (map.getLayer(h.id)) {
-    map.setPaintProperty(h.id, "line-color", colour);
-    map.setPaintProperty(h.id, "line-opacity", opacity);
+    map.setPaintProperty(h.id, "line-color", p.colour as maplibregl.ExpressionSpecification);
+    map.setPaintProperty(h.id, "line-opacity", p.opacity as maplibregl.ExpressionSpecification);
+    map.setPaintProperty(h.id, "line-width", p.width as maplibregl.ExpressionSpecification);
   } else {
     map.addLayer({
       id: h.id, type: "line", source: VECTOR_SOURCE, "source-layer": "transportation", minzoom: h.minzoom,
       filter: h.filter() as maplibregl.FilterSpecification,
       layout: { "line-cap": "round", "line-join": "round" },
-      paint: { "line-color": colour, "line-opacity": opacity, "line-width": zoomWidth(11, 0.4 * h.width, 12, 0.5 * h.width, 14, h.width, 16, 2.5 * h.width, 20, 10 * h.width) as maplibregl.ExpressionSpecification },
+      paint: { "line-color": p.colour as string, "line-opacity": p.opacity as number, "line-width": p.width as maplibregl.ExpressionSpecification },
     }, before);
   }
   if (kind === "bus") {
-    if (busOneWayOn) setBusOnewayArrows(map, dark === 1, before);
+    if (busOneWayOn) setBusOnewayArrows(map, dark === 1, before, p.mul);
     else if (map.getLayer(ONEWAY_LAYER)) map.removeLayer(ONEWAY_LAYER);
   }
 }
@@ -639,10 +691,13 @@ function setRoadHint(map: maplibregl.Map, kind: RoadHint, on: boolean) {
  * runs. `oneway` -1 is drawn against the line. They wait until the streets are close enough to draw
  * on, and go when the bus tool is off. */
 const ONEWAY_MINZOOM = 15;
-function setBusOnewayArrows(map: maplibregl.Map, dark: boolean, before: string | undefined) {
+function setBusOnewayArrows(map: maplibregl.Map, dark: boolean, before: string | undefined, mul: unknown) {
   ensureOnewayArrow(map, dark);
+  // the chevron's stroke is 3.5 px at size 1: sized to 1.2 x the road hint's own stroke at each zoom
+  const size = ["interpolate", ["exponential", 1.4], ["zoom"], ...[14, 0.43, 16, 1.06, 20, 4.24].map((s, i) => (i % 2 && mul !== 1 ? ["*", s, mul] : s))] as maplibregl.ExpressionSpecification;
   if (map.getLayer(ONEWAY_LAYER)) {
     map.setLayerZoomRange(ONEWAY_LAYER, ONEWAY_MINZOOM, 24);
+    map.setLayoutProperty(ONEWAY_LAYER, "icon-size", size);
     return;
   }
   map.addLayer({
@@ -651,9 +706,8 @@ function setBusOnewayArrows(map: maplibregl.Map, dark: boolean, before: string |
     layout: {
       "symbol-placement": "line",
       "symbol-spacing": 90,
-      "icon-image": ONEWAY_ARROW,
-      // the chevron's stroke is 3.5 px at size 1: sized to 1.2 x the road hint's own stroke at each zoom
-      "icon-size": ["interpolate", ["exponential", 1.4], ["zoom"], 14, 0.43, 16, 1.06, 20, 4.24] as maplibregl.ExpressionSpecification,
+      "icon-image": byFast(ONEWAY_ARROW_FAST, ONEWAY_ARROW) as maplibregl.ExpressionSpecification,
+      "icon-size": size,
       "icon-rotate": ["case", ["==", ["to-number", ["get", "oneway"]], -1], 180, 0] as maplibregl.ExpressionSpecification,
       "icon-rotation-alignment": "map",
       "icon-allow-overlap": true,

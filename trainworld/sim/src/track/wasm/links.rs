@@ -128,7 +128,7 @@ impl TrackApi {
                     net.edge_len[ei]
                 };
                 let len = (reach + STATION_TRIM_MARGIN_M).min(room).max(reach + 1.0);
-                let d = EdgeData { a: n, b: 0, tracks: net.edge_tracks[ei], pis: vec![], built: net.edge_built[ei], off: net.edge_off[ei], thru: vec![], crossover: false, kind: net.edge_kind[ei], sep: net.edge_sep[ei], day: net.edge_day[ei], oneway: net.edge_oneway[ei], join: [0; 2], limit: net.edge_limit[ei] };
+                let d = EdgeData { a: n, b: 0, tracks: net.edge_tracks[ei], pis: vec![], built: net.edge_built[ei], off: net.edge_off[ei], thru: vec![], crossover: false, kind: net.edge_kind[ei], sep: net.edge_sep[ei], day: net.edge_day[ei], oneway: net.edge_oneway[ei], join: [0; 2], limit: net.edge_limit[ei], ramp: net.edge_ramp[ei] };
                 let k = len * kk(net.frame().scaled(), y);
                 let (m, id) = (self.w.net.alloc_node(), self.w.net.alloc_edge());
                 nn.push(m);
@@ -296,7 +296,7 @@ impl TrackApi {
 
     /// Make blueprint edges track type `kind` (1 regular, 2 high speed, 3 tram; T-1898, T-3108), shape
     /// and level unchanged, by the rules of rebuilding built track (`rebuild_pieces`): a change of
-    /// family (rail to tram and back) takes whole joined stretches and fits stations and lines. One
+    /// family (rail to tram and back) fits stations and lines (T-3889: any part of a stretch). One
     /// undoable edit, free. Constructed track, single track, crossovers and pieces the track model
     /// refuses stay and are counted in `last_skipped`; pieces already that kind are not. Returns 1 when
     /// nothing changed (the issues of the last refusal, if any).

@@ -16,6 +16,7 @@
 // (checks/t1382-rows.mjs; `?patch=check` compares them in the page).
 import type { TrackApi } from "../wasm/track/sim";
 import type { ClockEdge, ClockLine, ClockNode } from "./protocol";
+import type { OuterGroup } from "../game/types";
 import type { Complexes } from "../game/complexes";
 import { nameSource } from "../game/complexLead";
 import { META_PER_LINE, PROFILES_PER_LINE } from "../map/profiles";
@@ -48,6 +49,8 @@ interface Heavy {
   /** T-1813: the group's bullet text and colour set by hand, "" for none */
   groupSymbol: string;
   groupColour: string;
+  /** T-3423: the groups around `group`, nearest first */
+  outer: OuterGroup[];
   /** the stops its trains serve and the path they run: the plan, or the part of it a partly built line runs (T-3474) */
   stops: number[];
   path: number[];
@@ -95,6 +98,7 @@ interface LineRead {
   tram: boolean;
   loopKind: number;
   oneWay: boolean;
+  oneWayByTrack: boolean;
   limit: number;
   fareDist: boolean;
   weekend: number[];
@@ -274,18 +278,20 @@ export class StateRows {
     for (let k = 0; k + 1 < jn.length; k += 2) joins.set(jn[k], jn[k + 1]);
     const lm = a.edge_limits(), limits = new Map<number, number>();
     for (let k = 0; k + 1 < lm.length; k += 2) limits.set(lm[k], lm[k + 1]);
+    const rp = a.edge_ramps(), ramps = new Map<number, number>();
+    for (let k = 0; k + 1 < rp.length; k += 2) ramps.set(rp[k], rp[k + 1]);
     const out: ClockEdge[] = [];
     const kept = this.edgeRows;
     const seen = new Set<number>();
     for (let i = 0; i < ei.length; i += 10) {
       const id = ei[i];
       const off = offEdges.has(id), hsr = hsrEdges.has(id), kind = a.edge_kind(id) >= 2 ? a.edge_kind(id) : 0 /* T-3078: 1 is high speed, which is rail */, crossover = crossovers.has(id), partner = crossovers.get(id) ?? -1;
-      const tracks = ei[i + 3] as 1 | 2, built = ei[i + 4] === 1, oneWay = oneWays.get(id) ?? 0, join = joins.get(id) ?? 0, limit = limits.get(id) ?? 0;
+      const tracks = ei[i + 3] as 1 | 2, built = ei[i + 4] === 1, oneWay = oneWays.get(id) ?? 0, join = joins.get(id) ?? 0, limit = limits.get(id) ?? 0, ramp = ramps.get(id) ?? 0;
       const setWay = (tracks === 1 ? a.edge_oneway(id) : 0) as 0 | 1 | 2 | 3, autoWay = (tracks === 1 ? a.edge_infer(id) : 0) as 0 | 1 | 2;
       let r = kept.get(id);
-      if (!r || r.a !== ei[i + 1] || r.b !== ei[i + 2] || r.tracks !== tracks || r.built !== built || r.off !== off || r.hsr !== hsr || r.kind !== kind || r.oneWay !== oneWay || r.join !== join || r.limit !== limit || r.setWay !== setWay || r.autoWay !== autoWay || r.crossover !== crossover || r.partner !== partner
+      if (!r || r.a !== ei[i + 1] || r.b !== ei[i + 2] || r.tracks !== tracks || r.built !== built || r.off !== off || r.hsr !== hsr || r.kind !== kind || r.oneWay !== oneWay || r.join !== join || r.limit !== limit || r.ramp !== ramp || r.setWay !== setWay || r.autoWay !== autoWay || r.crossover !== crossover || r.partner !== partner
         || !Object.is(r.lengthM, ei[i + 5]) || !Object.is(r.cost, ei[i + 6]) || !Object.is(r.vminKmh, ei[i + 7]) || r.levelMin !== ei[i + 8] || r.levelMax !== ei[i + 9]) {
-        r = { id, a: ei[i + 1], b: ei[i + 2], tracks, built, off, hsr, kind, oneWay, join, setWay, autoWay, crossover, partner, lengthM: ei[i + 5], cost: ei[i + 6], vminKmh: ei[i + 7], limit, levelMin: ei[i + 8], levelMax: ei[i + 9] };
+        r = { id, a: ei[i + 1], b: ei[i + 2], tracks, built, off, hsr, kind, oneWay, join, setWay, autoWay, crossover, partner, lengthM: ei[i + 5], cost: ei[i + 6], vminKmh: ei[i + 7], limit, ramp, levelMin: ei[i + 8], levelMax: ei[i + 9] };
         kept.set(id, r);
       }
       seen.add(id);
@@ -451,7 +457,7 @@ export class StateRows {
       read.push({
         i, id, ok, running, bus, prev, fresh,
         heavy: fresh ? this.heavy(a, id, ok) : prev!.heavy,
-        auto: a.line_auto(id), fast: a.line_fast(id), tram: a.line_tram(id), loopKind: a.line_loop(id), oneWay: a.line_one_way(id), limit: a.line_limit(id), fareDist: a.line_fare_dist(id), weekend: weekendOf(a, id), restTph: [...a.line_tph_rest(id)], shift: a.line_shift(id), upkeep: upkeepOf.get(id) ?? 0,
+        auto: a.line_auto(id), fast: a.line_fast(id), tram: a.line_tram(id), loopKind: a.line_loop(id), oneWay: a.line_one_way(id), oneWayByTrack: a.line_one_way_by_track(id), limit: a.line_limit(id), fareDist: a.line_fare_dist(id), weekend: weekendOf(a, id), restTph: [...a.line_tph_rest(id)], shift: a.line_shift(id), upkeep: upkeepOf.get(id) ?? 0,
         ...periodsOf(a, id),
         busRow: bus ? env.busRow(a, id, nodes ?? []) : undefined,
         pairs: bus ? 0 : a.line_pairs(id), twinOf: bus ? -1 : a.line_twin_of(id),
@@ -459,10 +465,10 @@ export class StateRows {
     }
     const out: ClockLine[] = [];
     for (const r of read) {
-      const { i, id, ok, running, prev, fresh, heavy, auto, fast, tram, loopKind, oneWay, limit, fareDist, weekend, restTph, shift, upkeep, pairs, twinOf, tphP, periods, periodsOwn, hours, hoursOwn, rows } = r;
+      const { i, id, ok, running, prev, fresh, heavy, auto, fast, tram, loopKind, oneWay, oneWayByTrack, limit, fareDist, weekend, restTph, shift, upkeep, pairs, twinOf, tphP, periods, periodsOwn, hours, hoursOwn, rows } = r;
       // the numbers behind the cheap fields: when all are as kept (and the heavy parts are), the row is the kept one
       const raw = li.slice(i, i + 22);
-      const extra = [upkeep, fast ? 1 : 0, tram ? 1 : 0, loopKind, oneWay ? 1 : 0, limit, fareDist ? 1 : 0, shift, pairs, twinOf, ...auto, weekend.length, ...weekend, ...restTph,
+      const extra = [upkeep, fast ? 1 : 0, tram ? 1 : 0, loopKind, oneWay ? 1 : 0, oneWayByTrack ? 1 : 0, limit, fareDist ? 1 : 0, shift, pairs, twinOf, ...auto, weekend.length, ...weekend, ...restTph,
         ...tphP, periods, periodsOwn, ...hours, hoursOwn ? 1 : 0, ...(rows ? [rows.figs.length, ...rows.figs, rows.set.length, ...rows.set, rows.auto?.length ?? -1, ...(rows.auto ?? []), rows.weekend.length, ...rows.weekend] : [])];
       if (!fresh && prev && sameNumbers(raw, prev.raw) && sameNumbers(extra, prev.extra)) {
         out.push(prev.row);
@@ -471,7 +477,7 @@ export class StateRows {
       const t3 = (k: number) => [li[i + k], li[i + k + 1], li[i + k + 2]] as [number, number, number];
       const row: ClockLine = {
         upkeep,
-        id, name: heavy.name, letter: heavy.letter, group: heavy.group, groupName: heavy.groupName, groupSymbol: heavy.groupSymbol, groupColour: heavy.groupColour, colour: hex(li[i + 1]), ok, running, broken: li[i + 4] === 1, tph: t3(5), cars: li[i + 21] || li[i + 8], carsSet: li[i + 8],
+        id, name: heavy.name, letter: heavy.letter, group: heavy.group, groupName: heavy.groupName, groupSymbol: heavy.groupSymbol, groupColour: heavy.groupColour, outer: heavy.outer, colour: hex(li[i + 1]), ok, running, broken: li[i + 4] === 1, tph: t3(5), cars: li[i + 21] || li[i + 8], carsSet: li[i + 8],
         lengthM: li[i + 9], roundTrip: t3(10), trains: t3(13), auto: autoOf(auto), delay: t3(16), dwell: li[i + 19], turnaround: li[i + 20],
         stops: heavy.stops, path: heavy.path,
         ...(heavy.planStops.length ? { planStops: heavy.planStops, planPath: heavy.planPath, stopStart: heavy.stopStart, pathStart: heavy.pathStart } : {}),
@@ -490,6 +496,7 @@ export class StateRows {
         hand: heavy.hand,
         loopKind,
         oneWay,
+        oneWayByTrack,
         limit,
         ...(fareDist ? { fareDist: true as const } : {}),
         ...(weekend.length ? { weekend } : {}),
@@ -513,8 +520,10 @@ export class StateRows {
   /** Every line's phase tables laid end to end, as `TrackApi.phases` answers, read after `lines`
    * (the trials that price a planned line or the construct-all quote, asked between states, note the
    * lines they recompute as changed: they are read here, and again by the next `lines`). The same
-   * array as last time while no line's tables changed; never to be transferred or changed. */
-  phases(a: TrackApi): Float32Array {
+   * array as last time while no line's tables changed; never to be transferred or changed.
+   * `meta` (`profile_meta`, read with them): T-3896, tables laid out to another length than it counts
+   * are read whole, since every line's after the first wrong one would be read from the wrong place. */
+  phases(a: TrackApi, meta?: Float32Array): Float32Array {
     const ids = new Set(this.phasePending);
     this.phasePending.clear();
     const moved = a.peek_changed_lines();
@@ -526,7 +535,14 @@ export class StateRows {
       for (const id of ids) this.readPhases(a, id);
       for (const id of this.phaseTables.keys()) if (!this.phaseSeen.has(id)) this.dropPhases(id);
     }
-    return this.phaseStale || !this.phaseAll ? this.layOutPhases() : this.phaseAll;
+    const out = this.phaseStale || !this.phaseAll ? this.layOutPhases() : this.phaseAll;
+    if (!meta) return out;
+    let n = 0;
+    for (let k = 1; k < meta.length; k += 4) n += meta[k];
+    if (n * 4 === out.length) return out;
+    console.error(`T-3896: the phase tables laid out by line are ${out.length / 4} phases against the ${n} counted: read whole`);
+    this.splitPhases(a);
+    return this.phaseAll!;
   }
 
   /** A line's phase tables, kept if they are the same. */
@@ -599,6 +615,7 @@ export class StateRows {
       groupName: a.line_group_name(id),
       groupSymbol: a.line_group_symbol(id),
       groupColour: ((c) => (c < 0 ? "" : hex(c)))(a.line_group_colour(id)),
+      outer: [...a.line_group_outer(id)].map((group, k) => ({ group, name: a.line_group_outer_name(id, k), symbol: a.line_group_outer_symbol(id, k), colour: ((c) => (c < 0 ? "" : hex(c)))(a.line_group_outer_colour(id, k)) })),
       back: [...a.line_back_path(id)],
       backStops: [...a.line_back_stops(id)],
       fromStart: [0, 1, 2].map((lev) => [...a.stop_times(id, 0, lev)]),

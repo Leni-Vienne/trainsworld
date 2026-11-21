@@ -38,6 +38,11 @@ pub fn design_radius(kmh: f64) -> f64 {
 /// Positions and radii are quantised to this (1 mm) when the player places them, so derived
 /// geometry is a deterministic f64 function of the save.
 pub const QUANT: f64 = 0.001;
+/// T-3883: the least turn an arc must make to limit speed, rad (0.017 degrees). A vertex a tool lays on a
+/// straight (a bridge's or a crossing's ramp end) is put on the millimetre grid, so its legs meet at
+/// up to about 1e-4 rad and it gets the automatic radius's 160 km/h arc a few millimetres long. In
+/// real saves 3e-4 and 1e-3 free the same pieces (notes/T-3883.md).
+pub const MIN_TURN: f64 = 3e-4;
 /// Every edge end at a node must leave along the node's heading or its reverse, within this (rad).
 pub const HEADING_TOL: f64 = 0.003;
 /// Slack when checking that two tangent lengths fit on one leg, m.
@@ -64,8 +69,23 @@ pub const MAX_LEVEL: i8 = 3;
 /// Height between levels, m.
 pub const LEVEL_H: f64 = 8.0;
 pub const MAX_GRADE: f64 = 0.04;
-/// Ramp length per level of height change, m (8 m at 4%).
+/// Ramp length per level of height change, m (8 m at 4%): every ramp before T-3027, and the ramps
+/// laid by tools other than the drawing tool (a flyover's, T-3120).
 pub const RAMP_PER_LEVEL: f64 = LEVEL_H / MAX_GRADE;
+/// T-3027 (Anita, 2026-11-20): a ramp's speed limit, km/h per metre of ramp per level, so 200 m a
+/// level is 160 and 400 m is 320. The lie: real ramps this short would need vertical curves good
+/// for about 65 km/h at 200 m (DECISIONS.md).
+pub const RAMP_KMH_PER_M: f64 = 0.8;
+/// T-3027: the shortest ramp per level where there is no room for a longer one, m: 5% on rail
+/// (128 km/h), 8% on tram track (80, over its 75 cap).
+pub const RAMP_FLOOR: f64 = 160.0;
+pub const TRAM_RAMP_FLOOR: f64 = 100.0;
+
+/// T-3027: the ramp per level the drawing tool aims for at a target of `kmh`, m: the length whose
+/// speed limit is that target (400 m at 320), never under `floor`.
+pub fn ramp_for(kmh: f64, floor: f64) -> u16 {
+    (kmh / RAMP_KMH_PER_M - 1e-9).ceil().max(floor).min(u16::MAX as f64) as u16
+}
 
 // ---- stations and trains (SPEC 6.1, 6.3) ----
 
@@ -188,14 +208,26 @@ pub const ECONOMY: f64 = 100.0;
 
 // ---- buses (T-1464, notes/T-1445.md) ----
 
-/// Per road-km of bus route (stops, shelters, signs), US$M, paid on Construct.
-pub const BUS_ROUTE_COST_PER_KM: f64 = 1.0;
+/// Per road-km of bus route (stops, shelters, signs), US$M, paid on Construct: a token, so a bus
+/// route costs about nothing beside its buses (Anita, T-3856: "basically 0 cost").
+pub const BUS_ROUTE_COST_PER_KM: f64 = 0.1;
 /// Price of one bus, US$M; buses are a fleet of their own, spares shared between bus lines.
 pub const BUS_PRICE: f64 = 0.6;
 /// Running cost per bus-km, real US$: two-thirds of real cost, nearer rail's discount (T-1718).
 pub const RUN_COST_BUS_KM: f64 = 6.0;
 /// Upkeep a day per road-km of constructed route, real US$ (US$3k a game day at `ECONOMY`).
 pub const UPKEEP_BUS_KM: f64 = 30.0;
+/// T-3907: a BRT line's floor over a plain bus's (`streets::BUS_LANE_KMH`), km/h: Anita, "10km/h faster than bus
+/// whatever it is", so it follows the plain floor when that moves.
+pub const BRT_LANE_BONUS_KMH: f64 = 10.0;
+/// T-3907: switching a bus line to BRT, US$M per road-km of its route: real BRT runs about US$5-20M a km, the low
+/// end while the game has no corridors or stations for it.
+pub const BRT_COST_PER_KM: f64 = 5.0;
+/// T-3907: a BRT route's upkeep a day per road-km in place of `UPKEEP_BUS_KM`, real US$: street tram track's at
+/// ground (US$21k a game day at `ECONOMY`), as Anita asked, since bus lanes wear the road faster than rails wear.
+pub const UPKEEP_BRT_KM: f64 = UPKEEP_GROUND_KM * STREET_TRAM_UPKEEP;
+/// Street tram track's upkeep over double track's (its `TrackSpec::upkeep`).
+pub const STREET_TRAM_UPKEEP: f64 = 0.6;
 /// A bus's riders at crush: a third of a train car (T-2919; demand's `BUS_CARS`), 53 at the rated load.
 pub const BUS_CRUSH: f64 = 80.0;
 
@@ -205,12 +237,18 @@ pub const BUS_CRUSH: f64 = 80.0;
 pub const PORT_COST: f64 = 10.0;
 /// Upkeep a day per constructed port, real US$ (US$10k a game day at `ECONOMY`, a fifth of a station's).
 pub const UPKEEP_PORT: f64 = 100.0;
-/// Price of one boat, US$M (a NYC Ferry 350-seat boat is US$7-9M); boats are a fleet of their own,
-/// spares shared between ferry lines.
+/// Price of one Medium boat, US$M (a NYC Ferry 350-seat boat is US$7-9M); each kind of boat
+/// (`ferry::Boat`, T-3892) is a fleet of its own, spares shared between ferry lines.
 pub const BOAT_PRICE: f64 = 8.0;
-/// Running cost per boat-km, real US$.
-pub const RUN_COST_BOAT_KM: f64 = 40.0;
-/// A boat's riders at crush: two train cars (T-2195; demand's `BOAT_DEMAND_CARS`), 320 at the rated load.
+/// A Small boat, US$M (a new 250-seat fast ferry is about US$17.5M) and a Large one (T-3892).
+pub const SMALL_BOAT_PRICE: f64 = 15.0;
+pub const LARGE_BOAT_PRICE: f64 = 50.0;
+/// Running cost per boat-km, real US$: Medium's, Small's and Large's (notes/T-3892.md 2: 40, 40 and
+/// 100, each cut by a quarter, Anita 2026-11-20, "for fun over realism").
+pub const RUN_COST_BOAT_KM: f64 = 30.0;
+pub const SMALL_RUN_COST_BOAT_KM: f64 = 30.0;
+pub const LARGE_RUN_COST_BOAT_KM: f64 = 75.0;
+/// A Medium boat's riders at crush: two train cars (T-2195), 320 at the rated load; `ferry::Boat::cars`.
 pub const BOAT_CRUSH: f64 = 2.0 * super::boarding::CRUSH_PER_CAR;
 
 pub fn level_mult(level: i8) -> f64 {
@@ -235,6 +273,9 @@ pub const TRACK_KINDS: usize = 4;
 /// T-2997: tram track's smallest curve, centre line, m: one every common modern low-floor tram takes
 /// (Citadis and Skoda 18, Combino 15); old street networks go down to 11-13 (notes/T-2921.md).
 pub const TRAM_MIN_RADIUS: f64 = 18.0;
+
+/// Off-street tram track's cap, km/h, and a tram's top speed on any track (T-3889).
+pub const TRAM_V_CAP_KMH: f64 = 75.0;
 
 /// T-3004: the share of the terrain surcharge tram track pays, street and off-street (Anita, 2026-11-10).
 pub const TRAM_TERRAIN: f64 = 0.25;
@@ -337,7 +378,7 @@ pub static TRACK_SPECS: [TrackSpec; TRACK_KINDS] = [
         terrain_mult: TRAM_TERRAIN,
         water_mult: 0.5,
         price_scale: 1.0,
-        upkeep: 0.6,
+        upkeep: STREET_TRAM_UPKEEP,
         road_crossings: false,
         ramps_over: false,
         section_s: 60.0,
@@ -352,7 +393,7 @@ pub static TRACK_SPECS: [TrackSpec; TRACK_KINDS] = [
     },
     TrackSpec {
         family: 1,
-        v_cap_kmh: 80.0,
+        v_cap_kmh: TRAM_V_CAP_KMH,
         min_radius: TRAM_MIN_RADIUS,
         level_mult: [1.6, 1.2, 0.6, 0.5, 0.6, 1.1, 1.6],
         terrain_mult: TRAM_TERRAIN,
@@ -391,6 +432,11 @@ impl TrackKind {
 
     pub fn is_hsr(self) -> bool {
         self == TrackKind::HighSpeed
+    }
+
+    /// T-3027: the shortest ramp per level this kind takes where room is short, m.
+    pub fn ramp_floor(self) -> f64 {
+        if self.spec().family == 1 { TRAM_RAMP_FLOOR } else { RAMP_FLOOR }
     }
 
     /// The kind a high-speed flag stands for.
@@ -663,7 +709,7 @@ mod kind_tests {
         assert_eq!(s.level_mult, [1.6, 1.2, 0.6, 0.1, 0.6, 1.1, 1.6]);
         assert_eq!(t.level_mult, [1.6, 1.2, 0.6, 0.5, 0.6, 1.1, 1.6]);
         assert_eq!((s.upkeep, t.upkeep), (0.6, 1.0));
-        assert_eq!((s.v_cap_kmh, t.v_cap_kmh), (60.0, 80.0));
+        assert_eq!((s.v_cap_kmh, t.v_cap_kmh), (60.0, 75.0));
         assert!(!s.road_crossings && !t.road_crossings);
         assert!(s.family == 1 && t.family == 1);
     }
@@ -699,18 +745,19 @@ mod kind_tests {
         }
         for (k, kind) in kinds.into_iter().enumerate() {
             let e = net.alloc_edge();
-            net.set_edge(e, Some(EdgeData { a: k as u32, b: k as u32 + 1, tracks: 2, pis: vec![], built: false, off: false, thru: vec![], crossover: false, kind, sep: false, day: 0, oneway: 0, join: [0; 2], limit: 0 })).unwrap();
+            net.set_edge(e, Some(EdgeData { a: k as u32, b: k as u32 + 1, tracks: 2, pis: vec![], built: false, off: false, thru: vec![], crossover: false, kind, sep: false, day: 0, oneway: 0, join: [0; 2], limit: 0, ramp: 0 })).unwrap();
         }
         net
     }
 
+    /// T-3889: tram track meets regular and high-speed track at a node; the node is rail's.
     #[test]
-    fn rail_and_tram_track_may_not_meet_at_a_node() {
-        use super::super::net::Issue;
-        let mixed = line_net([TrackKind::Regular, TrackKind::Tram]);
-        assert!(mixed.validate(&[], &[1], &[]).iter().any(|i| matches!(i, Issue::TrackFamily { node: 1 })));
-        for pair in [[TrackKind::Regular, TrackKind::HighSpeed], [TrackKind::StreetTram, TrackKind::Tram]] {
-            assert!(!line_net(pair).validate(&[], &[1], &[]).iter().any(|i| matches!(i, Issue::TrackFamily { .. })), "{pair:?}");
+    fn rail_and_tram_track_meet_at_a_node() {
+        for pair in [[TrackKind::Regular, TrackKind::Tram], [TrackKind::StreetTram, TrackKind::HighSpeed], [TrackKind::Regular, TrackKind::HighSpeed], [TrackKind::StreetTram, TrackKind::Tram]] {
+            let net = line_net(pair);
+            assert!(net.validate(&[0, 1], &[0, 1, 2], &[]).is_empty(), "{pair:?}");
+            let rail = pair.iter().find(|k| k.spec().family == 0).copied().unwrap_or(pair[0]);
+            assert_eq!(net.node_kind(1), rail, "{pair:?}");
         }
     }
 }

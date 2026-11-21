@@ -77,10 +77,17 @@ export interface NamePlan {
   ms: number;
 }
 
-/** a long name's two lines: broken at the space or hyphen nearest its middle, the hyphen kept on the
- * first; null for a short name or one with nowhere to break */
+/** a long name's two lines: broken at a "/" if it has one (kept on the first line), else at the space or
+ * hyphen nearest its middle, the hyphen kept on the first; null for a short name or one with nowhere to break */
 export function splitName(name: string): [string, string] | null {
   if ([...name].length < WRAP_FROM) return null;
+  let sl = -1, sd = Infinity;
+  for (let i = 1; i < name.length - 1; i++) {
+    if (name[i] !== "/") continue;
+    const d = Math.abs(i + 0.5 - name.length / 2);
+    if (d < sd) (sd = d), (sl = i);
+  }
+  if (sl >= 0) return [name.slice(0, sl + 1).trim(), name.slice(sl + 1).trim()];
   let best = -1, bd = Infinity;
   for (let i = 1; i < name.length - 1; i++) {
     if (name[i] !== " " && name[i] !== "-") continue;
@@ -91,13 +98,13 @@ export function splitName(name: string): [string, string] | null {
   return name[best] === " " ? [name.slice(0, best), name.slice(best + 1)] : [name.slice(0, best + 1), name.slice(best + 1)];
 }
 
-/** a station's name from its complex's members: the name with the most lines stopping, cut at the first "/" */
+/** a station's name from its complex's members: the name with the most lines stopping, whole (the map and panels show it whole) */
 export function pickName(members: readonly { name: string; lines: number }[]): string {
   const score = new Map<string, number>();
   for (const m of members) score.set(m.name, (score.get(m.name) ?? 0) + m.lines + 1e-3);
   let best = "", bs = -1;
   for (const [n, s] of score) if (s > bs) (best = n), (bs = s);
-  return best.split("/")[0].trim();
+  return best.trim();
 }
 
 /** a name's width in px at `fontPx`, guessed from its characters (Node checks; the page measures) */
@@ -427,6 +434,7 @@ export function paintNames(ctx: CanvasRenderingContext2D, plan: NamePlan, d: Dra
   const shown: [number, number, string, CanvasTextAlign, boolean][] = [];
   for (let i = 0; i < L.node.length; i++) {
     const k = L.node[i], b = placedBox(plan, li, i, s);
+    if (d.offNode?.[k]) continue;
     const x0 = sx(b[0]), x1 = sx(b[2]), y0 = sy(b[3]), y1 = sy(b[1]);
     if (x1 < 0 || x0 > w || y1 < 0 || y0 > h) continue;
     // a name left of its pill is set flush right, above or below it centred
@@ -455,6 +463,7 @@ export function nameAt(plan: NamePlan, d: Drawing, px: number, py: number, cx: n
   if (li < 0) return -1;
   const L = plan.at[li], x = cx + px / s, y = cy - py / s;
   for (let i = 0; i < L.node.length; i++) {
+    if (d.offNode?.[L.node[i]]) continue;
     const b = placedBox(plan, li, i, s);
     if (x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3]) return L.node[i];
   }

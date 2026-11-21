@@ -322,24 +322,19 @@ export function reachView(n: DemandNetwork, c: Cluster, reach: Uint8Array): PopV
     cars[i] = n.cars[l];
     o += p;
   });
-  const net: DemandNetwork = { frame: n.frame, stXY, complex, ...upsOf(n, stations, stLocal), lineN, stops, ...backOf(back, stops), times, tph, cars, fare: n.fare, hopKm, ...fareWOf(n, nodeGlobal), ...fzLinesOf(n, nodeGlobal, hopKm), span: spanOf(n, nodeGlobal), ...catchesOf(n, spans.flatMap(([l, a, b]) => Array.from({ length: b - a + 1 }, (_, k) => lineOff[l] + a + k))), ...ferryOf(n, spans.map(([l]) => l)) };
+  const at = spans.flatMap(([l, a, b]) => Array.from({ length: b - a + 1 }, (_, k) => lineOff[l] + a + k)), ls = spans.map(([l]) => l);
+  const net: DemandNetwork = { frame: n.frame, stXY, complex, ...passagesOf(n, stLocal), ...slicedOf(n, ls, at, stations), lineN, stops, ...backOf(back, stops), times, tph, cars, fare: n.fare, hopKm, ...fareWOf(n, nodeGlobal), ...fzLinesOf(n, nodeGlobal, hopKm), span: spanOf(n, nodeGlobal), ...catchesOf(n, at) };
   return { net, stLocal, nodeGlobal, pads: Uint32Array.from(pads) };
 }
 
-/** T-1281: the upgrades of `stations` (whole-network indices), where any of them has one, and the
- * passages with both ends among them, renumbered by `stLocal`. */
-function upsOf(n: DemandNetwork, stations: number[], stLocal: Int32Array): { ups?: Uint8Array; passages?: Uint32Array; fz?: Uint32Array } {
-  const out: { ups?: Uint8Array; passages?: Uint32Array; fz?: Uint32Array } = {};
-  if (n.ups && stations.some((s) => n.ups![s])) out.ups = Uint8Array.from(stations, (s) => n.ups![s]);
-  // T-3740: and their fare zones
-  if (n.fz && stations.some((s) => n.fz![s])) out.fz = Uint32Array.from(stations, (s) => n.fz![s]);
+/** T-1281: the passages with both ends among the stations `stLocal` numbers, renumbered by it. */
+function passagesOf(n: DemandNetwork, stLocal: Int32Array): { passages?: Uint32Array } {
   const pairs: number[] = [];
   for (let k = 0; k + 1 < (n.passages?.length ?? 0); k += 2) {
     const a = stLocal[n.passages![k]], b = stLocal[n.passages![k + 1]];
     if (a >= 0 && b >= 0) pairs.push(a, b);
   }
-  if (pairs.length) out.passages = Uint32Array.from(pairs);
-  return out;
+  return pairs.length ? { passages: Uint32Array.from(pairs) } : {};
 }
 
 /** T-1464: the bus corridors' stretches of the whole network's stops t, in that order; nothing
@@ -371,10 +366,32 @@ function backOf(back: Uint32Array | null, stops: Uint32Array): { back?: Uint32Ar
   return back && back.some((s, k) => s !== stops[k]) ? { back } : {};
 }
 
-/** T-2196: the whole network's ferry flags for `lines`, where any of them is a ferry. */
-function ferryOf(n: DemandNetwork, lines: number[]): { ferry?: Uint8Array } {
-  if (!n.ferry || !lines.some((l) => n.ferry![l])) return {};
-  return { ferry: Uint8Array.from(lines, (l) => n.ferry![l]) };
+/** The DemandNetwork fields with one flag per line, per stop (as `stops`) or per station, copied to a view
+ * from this one list (`slicedOf`): a new such field is added here and in `packService`, nowhere else. A view
+ * keeps a field only where any of its flags is set (the solver reads none as all clear). Fields of another
+ * shape (route nodes, stretches, pairs) have a helper each. */
+export const SLICED = {
+  ups: "station", // T-1281, T-3740: upgrades
+  fz: "station", // fare zones
+  ferry: "line", // T-2196
+  tram: "line", // T-2926
+  pierLines: "line", // T-3888
+  gradeStops: "stop",
+} as const satisfies Partial<Record<keyof DemandNetwork, "line" | "stop" | "station">>;
+
+/** The whole network's `SLICED` fields for a view's `lines`, stops `at` (whole-network stop indices, in the view's
+ * stop order) and `stations`. An array that is not one per line, stop or station is logged and left out. */
+function slicedOf(n: DemandNetwork, lines: number[], at: number[], stations: number[]): Pick<DemandNetwork, keyof typeof SLICED> {
+  const out: Record<string, Uint8Array | Uint32Array> = {};
+  const size = { line: n.lineN.length, stop: n.stops.length, station: n.stXY.length / 2 };
+  for (const [name, kind] of Object.entries(SLICED)) {
+    const all = n[name as keyof typeof SLICED];
+    if (!all) continue;
+    if (all.length !== size[kind]) { console.error(`demand network: ${name} has ${all.length} entries, one per ${kind} wants ${size[kind]}`); continue; }
+    const idx = kind === "line" ? lines : kind === "stop" ? at : stations;
+    if (idx.some((i) => all[i])) out[name] = all instanceof Uint8Array ? Uint8Array.from(idx, (i) => all[i]) : Uint32Array.from(idx, (i) => all[i]);
+  }
+  return out;
 }
 
 /** T-3758: the whole network's distance-fare lines and passed stations for the route nodes `nodeGlobal` names
@@ -428,10 +445,11 @@ function subNetwork(n: DemandNetwork, lineOff: Uint32Array, cities: CityId[], ma
     o += m;
   });
   const span = spanOf(n, nodeGlobal);
-  const net: DemandNetwork = { frame: n.frame, stXY, complex, ...upsOf(n, stations, stLocal), lineN, stops, ...backOf(back, stops), times, tph, cars, fare: n.fare, hopKm, ...fareWOf(n, nodeGlobal), ...fzLinesOf(n, nodeGlobal, hopKm), span, ...catchesOf(n, lines.flatMap((l) => Array.from({ length: n.lineN[l] }, (_, k) => lineOff[l] + k))), ...ferryOf(n, lines) };
-  const head = `${cities.join(",")}|${market}|${marketKey}|${rounds}|${n.fare.base}|${n.fare.perKm}|${frameKey}${curveKnots(n.fare).join(",")}|${JSON.stringify(n.fare.scales ?? {})}${transferFare(n.fare) ? `|x${transferFare(n.fare)}` : ""}${net.fz && n.fare.zones?.length ? `|z${JSON.stringify(n.fare.zones.map((a) => [a.id, chargedPrices(n.fare, a)]))}` : ""}`;
+  const at = lines.flatMap((l) => Array.from({ length: n.lineN[l] }, (_, k) => lineOff[l] + k));
+  const net: DemandNetwork = { frame: n.frame, stXY, complex, ...passagesOf(n, stLocal), ...slicedOf(n, lines, at, stations), lineN, stops, ...backOf(back, stops), times, tph, cars, fare: n.fare, hopKm, ...fareWOf(n, nodeGlobal), ...fzLinesOf(n, nodeGlobal, hopKm), span, ...catchesOf(n, at) };
+  const head = `${cities.join(",")}|${market}|${marketKey}|${rounds}|${n.fare.base}|${n.fare.perKm}|${frameKey}${curveKnots(n.fare).join(",")}|${JSON.stringify(n.fare.scales ?? {})}${n.fare.byCity ? `|c${JSON.stringify(n.fare.cityScales ?? {})}` : ""}${transferFare(n.fare) ? `|x${transferFare(n.fare)}` : ""}${net.fz && n.fare.zones?.length ? `|z${JSON.stringify(n.fare.zones.map((a) => [a.id, chargedPrices(n.fare, a)]))}` : ""}`;
   // station upgrades and passages (T-1281) only where there are any, so other networks keep their signatures
-  const ups = [...(net.ups ? [net.ups] : []), ...(net.passages ? [net.passages] : []), ...(net.catchN ? [net.catchN, net.catchXY!] : []), ...(net.fareW ? [net.fareW] : []), ...(net.baseW ? [net.baseW] : []), ...(net.ferry ? [net.ferry] : []), ...(net.back ? [net.back] : []), ...(net.fz ? [net.fz] : []), ...(net.fzDist ? [net.fzDist] : []), ...(net.fzPass ? [net.fzPassOff!, net.fzPass] : [])];
+  const ups = [...(net.ups ? [net.ups] : []), ...(net.passages ? [net.passages] : []), ...(net.catchN ? [net.catchN, net.catchXY!] : []), ...(net.fareW ? [net.fareW] : []), ...(net.baseW ? [net.baseW] : []), ...(net.ferry ? [net.ferry] : []), ...(net.tram ? [net.tram] : []), ...(net.pierLines ? [net.pierLines] : []), ...(net.gradeStops ? [net.gradeStops] : []), ...(net.back ? [net.back] : []), ...(net.fz ? [net.fz] : []), ...(net.fzDist ? [net.fzDist] : []), ...(net.fzPass ? [net.fzPassOff!, net.fzPass] : [])];
   const sig = hashOf([head, stXY, complex, ...ups, lineN, stops, times, tph, cars, hopKm, span]);
   const shape = hashOf([head, stXY, complex, ...ups, lineN, stops, cars, hopKm]);
   // T-3542: each period's own run times and trains an hour

@@ -7,13 +7,14 @@
 // each line is resampled every 50 m into `samples`; run 1's offset s is `length - s` on run 0.
 
 import { rgb } from "../game/palette";
+import { boatOf } from "../game/boats";
 import { hasUpgrade, UPGRADE } from "../game/upgrades";
 import type { PreviewAnswer } from "../workers/clockClient";
 import type { ClockEdge, ClockState } from "../workers/protocol";
 import { anchor, kAtY, toLocal, type Anchor } from "./geo";
-import { M_BAD, M_CONVERGE, M_CROSSING, M_DIVERGE, M_JUNCTION, M_REPEAT, MARK_STRIDE, rampMarks } from "./markData";
+import { M_BAD, M_CONVERGE, M_CROSSING, M_DIVERGE, M_JUNCTION, M_RAMPEND, M_REPEAT, MARK_STRIDE, rampMarks } from "./markData";
 import { repeatedEdge } from "../game/repeatTrack";
-import { placeFacilities } from "./facilityPlace";
+import { newFacilityCache, placeFacilities, type FacilityCache } from "./facilityPlace";
 import { buildingsDrawn, type BuildingDraw } from "./buildingNet";
 import { BAND_M_RANGE, BAND_RANGE, BAND_STRIDE, bandKnots, KNOT, lineBands, profileAt, type BandProfile } from "./lineBands";
 import { BOX_TOUCH_M, DEMAND_MERGE_M, offsetsReach, polylineGap } from "../game/complexes";
@@ -27,9 +28,9 @@ import { META_PER_LINE, ROW_SLOT, profileLine, profileOf, profileRun } from "./p
 /** A bus line's `lineCars` (T-1464): one car of this share of a train car's 20 m (a bus is 12 m),
  * narrower than a train's (rendererShaders.ts); below 1, so it tells a bus from a train. */
 export const BUS_CAR = 0.6;
-/** T-2194: a ferry line's: below 0, a boat of this many train cars' 20 m (35 m, `ferry::BOAT_LEN_M`),
- * drawn as one pointed hull. */
-export const BOAT_CAR = -1.75;
+/** T-2194: a ferry line's: below 0, a boat of this many train cars' 20 m, drawn as one pointed hull; T-3892: per
+ * boat size, Small 25 m, Medium 35 m, Large 90 m (`ferry::Boat::len_m`). The shader tells the size by it. */
+export const BOAT_CAR = [-1.25, -1.75, -4.5] as const;
 
 /** Colour index of bare track (not a line). */
 export const TRACK = 0xffffff;
@@ -1402,11 +1403,13 @@ export interface NetCache {
   samples: Map<number, LineSamples>;
   /** each complex's drawn passages, by its first member's id (`complexPassages`) */
   passages: Map<number, PassageEntry>;
+  /** T-3803: the waiting rooms' and car parks' placement, per complex */
+  facilities: FacilityCache;
   serial: number;
   last: { serial: number; track: EdgeEntry[]; lines: LineEntry[]; trackCount: number; lineCount: number; pts: Map<number, Float32Array> } | null;
 }
 
-export const newNetCache = (): NetCache => ({ edges: new Map(), lines: new Map(), stations: new Map(), speeds: new Map(), samples: new Map(), passages: new Map(), serial: 0, last: null });
+export const newNetCache = (): NetCache => ({ edges: new Map(), lines: new Map(), stations: new Map(), speeds: new Map(), samples: new Map(), passages: new Map(), facilities: newFacilityCache(), serial: 0, last: null });
 
 /**
  * T-1170: the cache's pieces moved to a new draw anchor, so the next build reuses them rather than
@@ -1534,6 +1537,17 @@ export function strokeRuns<P extends object>(parts: P[], count: (p: P) => number
  * the same either way. `deferStrokes` (the clock worker's): `track` and `lines` hold only their
  * counts, and `strokePieces` the pieces to make them from (map/strokePost.ts). */
 export function networkFromState(s: ClockState, cache: NetCache = newNetCache(), deferStrokes = false): NetworkBuffers {
+  const g = networkSteps(s, cache, deferStrokes);
+  for (;;) {
+    const r = g.next();
+    if (r.done) return r.value;
+  }
+}
+
+/** `networkFromState` in pieces (T-3803): the clock worker runs one a task, so an edit can come between them. The
+ * cache is written only in the last piece, so one dropped at a yield leaves it as the last finished build left it
+ * (the waiting rooms' placement and the passages, kept against their own last inputs, are in the last piece too). */
+export function* networkSteps(s: ClockState, cache: NetCache = newNetCache(), deferStrokes = false): Generator<void, NetworkBuffers, void> {
   const r = s.render;
   const edgePts = new Map<number, Float32Array>();
   const builtEdge = new Map<number, boolean>();
@@ -1561,6 +1575,7 @@ export function networkFromState(s: ClockState, cache: NetCache = newNetCache(),
   // T-3171: also where double track is the only double at a junction of single track (a double branching off single)
   const taperAt = (node: number) => singleAt.has(node) && (endCount.get(node) === 2 || doublesAt.get(node) === 1) && !joinedAt.has(node) && !splits.stations.has(node) && !splits.full.has(node);
   const shifts = legShifts(s.edges, r.edgeParts!);
+  yield;
   /** per edge id: the points and lanes its track and lines are drawn with */
   const drawn = new Map<number, LanePoints>();
   /** T-3212: single-track edges drawn splitting at a station (`F_SPLIT`) */
@@ -1590,7 +1605,7 @@ export function networkFromState(s: ClockState, cache: NetCache = newNetCache(),
       const b = new StrokeBuilder(false, MIN_SEG_M), from: number[] = [];
       b.add(lp.lpts, TRACK, e.id, flags, false, 0, undefined, lp.lane, undefined, undefined, from);
       const ramps: number[] = [];
-      rampMarks(own, e.built ? 0 : 1, ramps);
+      rampMarks(own, e.built ? 0 : 1, ramps, e.tracks === 2 ? 2 : 1, e.kind ? 1 : e.hsr ? 2 : 0);
       const strokes = b.build();
       // each stroke segment's segment of the edge's given points, for its speed
       const srcL = from.length === lp.lpts.length / 3 - 1 ? lp.src : from.map((k) => (lp.src ? lp.src[k] : k));
@@ -1611,10 +1626,11 @@ export function networkFromState(s: ClockState, cache: NetCache = newNetCache(),
     trackOrder.push(e.id);
     for (const v of c.ramps) marks.push(v);
   }
+  yield;
   const maxLine = s.lines.reduce((m, l) => Math.max(m, l.id), -1);
   const lineColours = new Uint8Array(Math.max(1, maxLine + 1) * 4);
   const lineCars = new Float32Array(r.lineTable.length / 4).fill(8);
-  for (const l of s.lines) lineCars[l.id] = l.bus?.ferry ? BOAT_CAR : l.bus ? BUS_CAR : l.tram ? Math.max(1, l.cars) + TRAM_MARK : Math.max(1, l.cars);
+  for (const l of s.lines) lineCars[l.id] = l.bus?.ferry ? BOAT_CAR[boatOf(l.bus)] : l.bus ? BUS_CAR : l.tram ? Math.max(1, l.cars) + TRAM_MARK : Math.max(1, l.cars);
   const lineParts: LineEntry[] = [];
   let lineCount = 0;
   const linesSeen: NetCache["lines"] = new Map();
@@ -1794,8 +1810,7 @@ export function networkFromState(s: ClockState, cache: NetCache = newNetCache(),
     const slot = backSlotOf(r.lineTable, r.meta, l.id);
     if (slot >= 0 && l.back?.length) runSamples(slot, l.back, c.backStroke ?? [], true);
   }
-  cache.lines = linesSeen;
-  cache.samples = samplesSeen;
+  yield;
   // the fastest train over each built segment (T-1271), from each line's speeds, kept per line
   const speedsSeen: NetCache["speeds"] = new Map();
   const trainOf = new Map<number, Float32Array>();
@@ -1815,7 +1830,6 @@ export function networkFromState(s: ClockState, cache: NetCache = newNetCache(),
       for (let j = 0; j < v.length; j++) if (v[j] > t[j]) t[j] = v[j];
     });
   }
-  cache.speeds = speedsSeen;
   const trackParts: EdgeEntry[] = [];
   let trackCount = 0;
   for (const id of trackOrder) {
@@ -1825,7 +1839,7 @@ export function networkFromState(s: ClockState, cache: NetCache = newNetCache(),
     trackParts.push(c);
     trackCount += c.strokes.count;
   }
-  cache.edges = edgesSeen;
+  yield;
   const served = new Map<number, number>();
   for (const l of s.lines) for (const st of new Set([...l.stops, ...(l.backStops ?? [])])) served.set(st, (served.get(st) ?? 0) + 1);
   // whether a line runs through each node, so a station's box covers it (one line width since T-190)
@@ -1905,12 +1919,13 @@ export function networkFromState(s: ClockState, cache: NetCache = newNetCache(),
     stationLine.set(c.line, i * 2 * PLATFORM_POINTS);
     stations.set([p[0], p[1], ((served.get(n.id) ?? 0) > 1 ? 1 : 0) | (n.stationBuilt ? 0 : 2) | (lined.has(n.id) ? 4 : 0) | (n.stationOff ? 8 : 0) | ((pe?.tracks === 2 && !oneSide) || split ? 16 : 0) | (side ? ST_ONE | (side < 0 ? ST_ONE_NEG : 0) : 0) | (single ? ST_SINGLE | ST_ONE_MID : 0) | (n.kind ? ST_TRAM : 0) | (hasUpgrade(n.upgrades, UPGRADE.waitingRoom) ? ST_ROOM : 0) | (hasUpgrade(n.upgrades, UPGRADE.parkRide) ? ST_PARK : 0) | (hasUpgrade(n.upgrades, UPGRADE.terminal) ? ST_TERMINAL | (ids.length === 1 ? ST_BUFFER : 0) : 0) | (passingAt.has(n.id) ? ST_PASSING : 0)], i * 3);
   });
-  cache.stations = stationsSeen;
+  yield;
   // T-2219: the station buildings' members as drawn (their boxes join the floor), which car parks stay out of
   const outlines = buildingsDrawn(s.buildings, s.buildingLL, st, stations, stationLine, edgePts, false);
   for (let i = 0; i < st.length; i++) if (outlines.memberOf[i] >= 0) stations[i * 3 + 2] += ST_BUILDING;
   // T-1528: one waiting room and one car park per complex
-  const lots = placeFacilities(st, stations, stationLine, stationShape, edgePts, waysAt, s.complexOf, outlines.draw);
+  // (T-3803: kept per complex between the clock worker's builds)
+  const lots = placeFacilities(st, stations, stationLine, stationShape, edgePts, waysAt, s.complexOf, outlines.draw, cache.facilities);
   // their insides, which leave room for the waiting rooms just placed
   const bld = outlines.draw.length ? buildingsDrawn(s.buildings, s.buildingLL, st, stations, stationLine, edgePts) : outlines;
   // the player's links as bridges between the two platforms' nearest points (T-217)
@@ -1987,6 +2002,7 @@ export function networkFromState(s: ClockState, cache: NetCache = newNetCache(),
     const pad = 50 * kAtY(box[1]);
     for (let k = 0; k < marks.length; k += MARK_STRIDE) {
       const x = marks[k], y = marks[k + 1];
+      if (marks[k + 2] === M_RAMPEND) continue;
       if (x >= box[0] - pad && x <= box[2] + pad && y >= box[1] - pad && y <= box[3] + pad) clear.push([x, y]);
     }
     const runs: OneWayEdge[] = [];
@@ -2021,6 +2037,11 @@ export function networkFromState(s: ClockState, cache: NetCache = newNetCache(),
       d += len;
     }
   }
+  cache.edges = edgesSeen;
+  cache.lines = linesSeen;
+  cache.samples = samplesSeen;
+  cache.speeds = speedsSeen;
+  cache.stations = stationsSeen;
   const serial = ++cache.serial, last = cache.last;
   const patch: NetPatch | undefined = last ? {
     base: last.serial,

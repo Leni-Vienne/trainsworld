@@ -23,9 +23,9 @@ import { awayNear, DAY_KINDS, kindMade, PLAIN_KIND, rushRun } from "./days";
 import { demandByDay, lineLoadsFor, type DemandView } from "./demand";
 import { cityById, isCity } from "./cities";
 import { faresFor, faresOf, lineFareMul, ownLineFare, type Fares } from "./fareCurve";
-import { countryFareScales } from "./fareDefault";
+import { boatFleet, boatOf } from "./boats";
+import { cityFareScales, cityScale } from "./fareDefault";
 import { lineFares } from "./fareInEffect";
-import { fareScale } from "./income";
 import { stationZone } from "./listScope";
 import { PERIODS } from "./periods";
 import { pairRows, pairStats, setCarBuyCheck, setTrainBuyCheck, stopsById, world } from "./world";
@@ -61,7 +61,7 @@ export function trainShortfall(id: LineId, trains: readonly number[]): { need: n
 export function carShortfall(id: LineId, more: number): { need: number; have: number } | null {
   const m = moneyState.peek(), st = world.peek()?.lineStats[id];
   if (!m || !st || st.status !== "running" || m.mode === "sandbox" || !(more > 0)) return null;
-  const [owned, needed, price] = st.bus?.ferry ? [m.fleetFerry, m.boatsNeeded, m.boatPrice] : st.bus ? [m.fleetBus, m.busesNeeded, m.busPrice]
+  const [owned, needed, price] = st.bus?.ferry ? boatFleet(m, st) : st.bus ? [m.fleetBus, m.busesNeeded, m.busPrice]
     : st.tram ? [m.fleetTram, m.tramsNeeded, m.tramPrice] : st.fast ? [m.fleetFast, m.carsNeededFast, m.hsCarPrice] : [m.fleet, m.carsNeeded, m.carPrice];
   const need = Math.max(0, needed + more - owned) * price, have = liveMoney.peek().cash;
   return need > 1e-9 && need > have + 1e-6 ? { need, have } : null;
@@ -88,14 +88,21 @@ export interface Income {
   lines: Map<string, LineMoney>;
 }
 
+/** T-3907: a bus route's upkeep a day, real US$ (times the economy in the game): a BRT one's road in town at its own
+ * rate. */
+export const busUpkeepDay = (t: { upkeepBusKm?: number; upkeepBrtKm?: number }, b: { roadM: number; brt?: boolean; townM?: number }) => {
+  const town = b.brt ? Math.min(b.roadM, b.townM ?? 0) : 0;
+  return ((b.roadM - town) * (t.upkeepBusKm ?? 0) + town * (t.upkeepBrtKm ?? 0)) / 1000;
+};
+
 /** What the money, points and region figures read of `moneyState`: the same object while these are
  * the same, so a state or an hour's money that leaves them alone redoes no sums (T-1209). */
-export type MoneyTerms = Pick<MoneyState, "fares" | "economy" | "upkeepTrackKm" | "upkeepViaductKm" | "upkeepCutKm" | "upkeepBoredKm" | "upkeepStation" | "upkeepStationUnder" | "upkeepOnePlatform" | "upkeepSingle" | "upkeepHsr" | "upkeepBusKm" | "upkeepPort">;
+export type MoneyTerms = Pick<MoneyState, "fares" | "economy" | "upkeepTrackKm" | "upkeepViaductKm" | "upkeepCutKm" | "upkeepBoredKm" | "upkeepStation" | "upkeepStationUnder" | "upkeepOnePlatform" | "upkeepSingle" | "upkeepHsr" | "upkeepBusKm" | "upkeepBrtKm" | "upkeepPort">;
 let termsKey = "", terms: MoneyTerms | null = null;
 export const moneyTerms = computed<MoneyTerms | null>(() => {
   const m = moneyState.value;
   if (!m) return (termsKey = "", terms = null);
-  const t: MoneyTerms = { fares: m.fares, economy: m.economy, upkeepTrackKm: m.upkeepTrackKm, upkeepViaductKm: m.upkeepViaductKm, upkeepCutKm: m.upkeepCutKm, upkeepBoredKm: m.upkeepBoredKm, upkeepStation: m.upkeepStation, upkeepStationUnder: m.upkeepStationUnder, upkeepOnePlatform: m.upkeepOnePlatform, upkeepSingle: m.upkeepSingle, upkeepHsr: m.upkeepHsr, upkeepBusKm: m.upkeepBusKm, upkeepPort: m.upkeepPort };
+  const t: MoneyTerms = { fares: m.fares, economy: m.economy, upkeepTrackKm: m.upkeepTrackKm, upkeepViaductKm: m.upkeepViaductKm, upkeepCutKm: m.upkeepCutKm, upkeepBoredKm: m.upkeepBoredKm, upkeepStation: m.upkeepStation, upkeepStationUnder: m.upkeepStationUnder, upkeepOnePlatform: m.upkeepOnePlatform, upkeepSingle: m.upkeepSingle, upkeepHsr: m.upkeepHsr, upkeepBusKm: m.upkeepBusKm, upkeepBrtKm: m.upkeepBrtKm, upkeepPort: m.upkeepPort };
   const key = JSON.stringify(t);
   if (key !== termsKey || !terms) { termsKey = key; terms = t; }
   return terms;
@@ -127,10 +134,11 @@ function sameShape(a: WorldView, b: WorldView): boolean {
   }
   return true;
 }
-/** T-1464: a bus line's stops in the same places, built or not, the same road length. */
+/** T-1464: a bus line's stops in the same places, built or not, the same road length; T-3892: a ferry line's boat
+ * size too (its fare multiple); T-3907: on BRT or not (its upkeep). */
 function sameBus(a: LineStats["bus"], b: LineStats["bus"]): boolean {
   if (!a || !b) return a === b;
-  if (a.built !== b.built || a.roadM !== b.roadM || a.stops.length !== b.stops.length) return false;
+  if (a.built !== b.built || a.roadM !== b.roadM || a.stops.length !== b.stops.length || a.ferry?.boat !== b.ferry?.boat || a.brt !== b.brt || a.townM !== b.townM) return false;
   return a.stops.every((s, i) => s.id === b.stops[i].id && s.lng === b.stops[i].lng && s.lat === b.stops[i].lat);
 }
 let shaped: WorldView | null = null;
@@ -207,7 +215,7 @@ function incomeFor(w: WorldView | null, m: MoneyTerms | null, dv: DemandView | n
       const based = baseOf.get(l.id) ?? 0;
       // T-1626, T-2195: a high-speed or ferry line's rides pay its multiplier on the rate, T-3567 times the line's own;
       // demand's extra has it already
-      const mul = lineFareMul({ id: l.id, fast: st.fast, ferry: !!st.bus?.ferry, bus: !!st.bus && !st.bus.ferry }, lf);
+      const mul = lineFareMul({ id: l.id, fast: st.fast, ferry: !!st.bus?.ferry, boat: boatOf(st.bus), bus: !!st.bus && !st.bus.ferry }, lf);
       pkm.forEach((pk, p) => {
         const share = total > 0 ? pk / total : 0;
         const r = (faresFor(fares, based * share, pkmPaid[p], mul) + (dm.fareX?.[p] ?? 0)) * x;
@@ -326,11 +334,17 @@ export function scalesOf(g: LineGeo, l: LineInput, byId: Map<string, StationInpu
   }
   return g.scales;
 }
-/** A stop's multipliers on the curve as set: its country's (`countryFareScales`), on the base of a boarding there
- * and on the rate of a stretch from there. T-3748, T-3753: every trip's curve extra and base extra are charged at
- * these too, each route node's at the stop it leaves (demandClient `packService`, the demand worker's `sumAll`). */
-export function stopFareScales(s: Pick<StationInput, "id" | "lng" | "lat"> | undefined, fares: Pick<Fares, "base" | "perKm" | "scales"> & { nodes?: Fares["nodes"] }): { base: number; rate: number } {
-  return countryFareScales((s && stationCountry(s)) ?? undefined, fares);
+/** A stop's multipliers on the curve as set: its zone's (`cityFareScales`: its country's, or with fares by city its
+ * city's), on the base of a boarding there and on the rate of a stretch from there. T-3748, T-3753: every trip's
+ * curve extra and base extra are charged at these too, each route node's at the stop it leaves (demandClient
+ * `packService`, the demand worker's `sumAll`). */
+export function stopFareScales(s: Pick<StationInput, "id" | "lng" | "lat"> | undefined, fares: Pick<Fares, "base" | "perKm" | "scales" | "byCity" | "cityScales"> & { nodes?: Fares["nodes"] }): { base: number; rate: number } {
+  return cityFareScales(s ? stationCity(s) : null, fares);
+}
+/** T-3766: the zone a station is in, null outside every zone. */
+export function stationCity(s: Pick<StationInput, "id" | "lng" | "lat">): string | null {
+  const z = stationZone(s);
+  return z && isCity(z) ? z : null;
 }
 
 /** T-1277: the country of the zone a station is in (null outside every zone). */
@@ -338,11 +352,11 @@ export function stationCountry(s: Pick<StationInput, "id" | "lng" | "lat">): str
   const z = stationZone(s);
   return z && isCity(z) ? cityById(z).country ?? null : null;
 }
-/** T-1277: each stop's fare scale, by the country it is in; a stop outside every zone takes the
- * baseline's. */
-export function stopScales(stops: string[], byId: Map<string, StationInput>, scales: Record<string, number> | undefined): number[] {
+/** T-1277: each stop's fare scale, by the country it is in (T-3766: or with fares by city its city); a stop outside
+ * every zone takes the baseline's. */
+export function stopScales(stops: string[], byId: Map<string, StationInput>, fares: Pick<Fares, "scales" | "byCity" | "cityScales">): number[] {
   return stops.map((id) => {
     const s = byId.get(id);
-    return fareScale((s && stationCountry(s)) ?? undefined, scales);
+    return cityScale(s ? stationCity(s) : null, fares);
   });
 }

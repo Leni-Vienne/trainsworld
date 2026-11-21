@@ -482,7 +482,16 @@ notes/T-420.md has the tables.
   mask and OSM roads, the same for every country) there is no car and no walk; the player's network
   is the only way, its share held only by the ratio curve's 3-4x fade against a car on a bridge
   that is not there, and the rest no way serves. No constant. Car ferries count as no road, one
-  rule everywhere (Anita, 2026-11-03). Why it may not carry over: where road ferries are part of
+  rule everywhere (Anita, 2026-11-03). The regional market takes the same rule between places on
+  two landmasses with no flight (T-2216, Anita's call 2026-11-20; Vancouver - Victoria, Singapore - Batam):
+  longer trips, commutes and outings, each against its own car's cost on that bridge. It takes it
+  too between 6 km zones on two lands (T-2216 stage 2, Anita's yes 2026-11-20; Sado in Niigata's
+  place, Okinawa's outer islands, Aegina in Athens's): a zone's land is its main part's (T-2213's
+  `zone_parts`), its place's landmass on the pack's most populous part, else the part's world
+  landmass where the part reaches the grid's edge or lies on another landmass than the main part,
+  else an island of its own. A plane between the two places stays; there is none within a place. A
+  zone's people walk and ride only to stations on its land (a station's land is its nearest site's).
+  Why it may not carry over: where road ferries are part of
   the road network (Sweden's vägfärjor, Norway's riksvei ferries, the Philippines' RoRo routes,
   Indonesia's ASDP crossings) an island keeps a real car the model takes away, and a player's
   boat there fills with drivers who in fact cross by car; OSM ways a car can use but the public
@@ -637,18 +646,24 @@ notes/T-420.md has the tables.
   Paris) nearly every cell is in reach and nothing moves; where stations are far apart a far
   subzone's riders gather on its cells nearer the station, more than in New York (notes/T-1920.md).
 - **Walking the whole way** (T-558, T-636, docs/demand-mode.md 4.3 "Walking"). A mode in the choice
-  beside rail and the car (or other), at 1.5 perceived minutes a minute at every length, with a
-  bonus of 10 perceived minutes against the car (`walk_bonus_min`) for what a short drive costs beyond
-  its road time, one value for commutes and everyday trips and for every country. A commute walks
-  between six home and six job cells of its zones, not their 2 km centres (T-587), so its walk
-  shares by distance follow the everyday layer's. Why it may not
-  carry over: walking tolerance differs by climate, culture, street design and safety, and the
-  bonus also stands for how much a short drive costs beyond its road time, which differs with car
-  ownership and parking. Check: a country's travel survey walk shares by distance (NHTS,
-  England's NTS, France's EMP, Japan's person-trip surveys) and its census walk-to-work share.
+  beside rail and the car (or other), at 1.5 perceived minutes a minute at every length, with no
+  head start (`walk_bonus_min` 0 since T-3888; 10 before), one rule for commutes and everyday trips
+  and for every country. A tenth of every trip's people (`walk_tier`) never walk it whole past 800 m
+  (`walk_tier_m`) and are let off the walking rule (T-3888): about 5% of people can't walk far
+  (US ACS 6.7% with serious difficulty, fewer trips), the rest stands for those who won't. A commute
+  walks between six home and six job cells of its zones, not their 2 km centres (T-587), so its walk
+  shares by distance follow the everyday layer's. Why it may not carry over: walking tolerance
+  differs by climate, culture, street design and safety, and the share who can't walk far with age
+  (people 65+ are 29% of Japan, 3% of Nigeria). Check: a country's travel survey walk shares by
+  distance (NHTS, England's NTS, France's EMP, Japan's person-trip surveys) and its census
+  walk-to-work share.
+- **The boarding cost** (T-3888, T-3910). A trip pays 2 perceived minutes at its first boarding and 2 at
+  its last alighting, on a train or a tram at any level; nothing on a bus or ferry, or at a change.
+  One number for every place. Why it may not carry over: the depth of stations (Moscow's or Kyiv's
+  deep stations take minutes of escalator, a street-level light rail none), lifts and escalators. Check: station access times from a travel survey or an
+  operator's published entrance-to-platform times.
 
-- **Trams** (T-2926). A tram line is a rail line: it boards with no penalty (a bus pays 4 perceived
-  minutes), each tram section counts as three quarters of a rail car in seats, rated and crush loads,
+- **Trams** (T-2926). A tram line is a rail line: it boards with no penalty (as every line since T-3856), each tram section counts as three quarters of a rail car in seats, rated and crush loads,
   and a cell keeps at most 3 stops served only by tram lines among its 6 nearest stations, so a street of
   close stops does not crowd out the metro a short walk away. A stop a metro or rail line also serves is
   an ordinary station. All three are one number for every place. Why they may not carry over: where
@@ -708,7 +723,7 @@ notes/T-420.md has the tables.
   cap of bases a boarding times its own multiple, and never below 0 (T-3578): a line at 0 takes no base, and no
   line's fares go below 0. Which line's multiple set a trip's base is not traced; the pool's network-wide
   shares stand in, as for the base itself.
-  Ferry lines take the player's Ferry multiplier and bus lines the Bus multiplier (T-3028) the same way (default 1.00, T-2195; "Ferries as lines" below).
+  Ferry lines take the player's Ferry multiplier and bus lines the Bus multiplier (T-3028) the same way (defaults 1.00 and 0.80, T-2195, T-3856; "Ferries as lines" below).
   **Transfer fare** (T-1801): the player's, $0 by default, paid on each change of line except one
   inside a fare zone run (T-3784), times the
   country's scale and weighed at its `fare_w` like the curve; the regional market changes free. At
@@ -1073,43 +1088,45 @@ notes/T-420.md has the tables.
   extra minutes weigh less. Check: night and late-evening rail shares on a real network with
   service ending early (a commuter line without evening trains) against the model's.
 - **Bus corridors** (T-1464, Anita's yes to the design, 2026-10-26; docs/demand-kernel.md step 2).
-  A home within 300 m of a bus route walks its distance to the route plus 100 m and rides at the bus's run time (T-2904: a hop takes the
-  car's time at 90% of its speed, never under 30 km/h for a bus lane, plus 28 s for the stop; about 19 km/h at
-  400 m stops in a dense centre, 22 in open country), on the network's fare curve, bus kilometres included. Every boarding of a bus, a change
-  from a train or another bus onto it included, costs 4 perceived minutes on top of the wait
-  (T-1576; unreliability, crowding at the stop, a stop not worth the wait for a short hop). Judgement
-  figures, not fitted; the 300 m and a 6 minute boarding cost (4 since T-3522) were chosen so a drawn route's riders per route-km
-  land in the range of busy real routes (notes/T-1466.md). Why they may not carry over: bus speeds
+  A home within 600 m of a bus route walks its distance to the route plus 100 m and rides at the bus's run time (T-2904: a hop takes the
+  car's time at 85% of its speed, never under 30 km/h for a bus lane, plus 28 s for the stop; about 19 km/h at
+  400 m stops in a dense centre, 22 in open country), on the network's fare curve, bus kilometres included. Boarding a
+  bus costs what boarding a train does, the wait alone (Anita, T-3856: buses should be viable for short trips; a
+  boarding cost of 6 perceived minutes from T-1576, 4 from T-3522, was dropped). Judgement
+  figures, not fitted: 300 m and the boarding cost were first chosen so a drawn route's riders per route-km
+  land in the range of busy real routes (notes/T-1466.md); T-3856 (Anita) dropped the boarding cost and doubled the
+  reach to 600 m so buses win short, thin trips (notes/T-3856.md). Why they may not carry over: bus speeds
   run from about 10 km/h in dense Asian and African centres to 25-30 in North American suburbs, and
   the model gives every dense centre a bus lane's speed (Seoul's median lanes, Anita 2026-11-09), so
   buses where traffic holds them up in reality are faster here than real ones;
   where buses are informal or fares flat and separate (minibus taxis, many Latin American cities),
-  the one fare curve and the free change to rail overstate the feeder; a 300 m corridor is short
-  where blocks are huge or long where people walk further to a bus (low car ownership). Check: a
+  the one fare curve and the free change to rail overstate the feeder; a 600 m corridor is long
+  where people with cars will not walk that far to a bus, and short where blocks are huge. Check: a
   city's bus ridership per route-km against the model's on a similar drawn network.
 - **Ferries as lines** (T-2195, design notes/T-2177.md 3.6; docs/demand-kernel.md step 4). A ferry
   line is a line like any other: its ports are stations walked to as any station, the minutes aboard
-  are the boats' run (45 km/h in open water, 10 in narrow channels, 0.15 m/s² at each port), the
-  wait half the headway, a change to or from it a change like any other, and no boarding cost (a
-  ferry is boarded from a waiting room, as a train is). A boat holds two train cars (480 at crush).
-  Its kilometres pay the one fare curve, the part above the base times the player's Ferry multiple
-  (1.00 by default), and its trips are the network's. One rule everywhere, no constant. Why it may not
+  are the boats' run (45 km/h in open water, a Small boat 65, 10 in narrow channels, 0.15 m/s² at each
+  port), the wait half the headway, a change to or from it a change like any other, and no boarding cost, as
+  for any line. A boat holds its size's train cars (T-3892: Small 1,
+  Medium 2, Large 8; 240, 480 and 1,920 at crush). Its kilometres pay the one fare curve, the part above the
+  base times the player's ferry multiple for its boat size (Small 1.50, Medium and Large 1.00 by default), and
+  its trips are the network's. One rule everywhere, no constant. Why it may not
   carry over: real ferries are priced every which way (Staten Island's is free, NYC Ferry's and
   Sydney's apart from the metro, Istanbul's the metro's), so one curve and one multiple stand for all
   of them; a real boat holds 150 to 4,500 riders; demand's walks over water (three times a metre on
   land, standing for small ferries and bikes) stay, so a water crossing has its walk beside the
   player's ferry. Check: a drawn harbour ferry's weekday riders against the real one's at a similar
   headway (Staten Island about 70,000 a weekday before 2020 at a boat every 15-30 minutes).
-- **Ferry fans** (T-2196, Anita 2026-11-03; docs/demand-mode.md "Ferry fans"). A tenth of visits
-  and attractions trips (not errands, commutes, school, university, medical or airports) count each
-  minute aboard a ferry at 0.1; everything else in their choice is anyone's. One share, one weight,
-  no country constant. Why it holds: harbour ferries carry visitors and day-trippers beside their
+- **Ferry fans** (T-2196, Anita 2026-11-03 and 2026-11-20, T-3892; docs/demand-mode.md "Ferry fans"). 15%
+  of every everyday purpose's trips, 7.5% of airport and medical trips and of commutes (not trips between
+  zones), count each minute aboard a ferry at 0.1; everything else in their choice is anyone's. A share per
+  purpose, one weight, no country constant. Why it holds: harbour ferries carry visitors and day-trippers beside their
   commuters wherever they run (the Staten Island ferry's tourists, Sydney's Manly ferry, Istanbul's
   Bosphorus ferries, Hong Kong's Star Ferry), and the ride is the outing as much as the way there.
   Why it may not carry over: where a ferry is a plain commuter crossing with nothing to see (a short
   river shuttle) the fans overstate its weekend riders; a sightseeing cruise that goes nowhere is no
   trip at all here; a long scenic crossing could draw fans past a direct train beside it, bounded by
-  the tenth. Check: a harbour ferry's Sunday riders against its weekday's, where the operator
+  the share. Check: a harbour ferry's Sunday riders against its weekday's, where the operator
   publishes both.
 
 ## Intercity
@@ -1174,8 +1191,11 @@ notes/T-420.md has the tables.
   need booking days ahead, or run once a day, a 30 minute cap undersells the cost of a sparse
   timetable; where trains are late often, arriving early costs more. Check: rail's share on
   corridors served every 2 hours or less often against published shares.
-- **No car between landmasses** (T-377, T-375's fixed links). Far pairs on two landmasses fly
-  (T-378); near ones (under 250 km) keep their trips fixed; a ferry is no link.
+- **No car between landmasses** (T-377, T-375's fixed links). Far pairs on two landmasses whose
+  ends both have airports fly (T-378); every other pair on two landmasses has the player's network
+  as its only way, held by the islands' rule (above: all ride up to 3 times a drive over a bridge
+  that is not there, none from 4), the rest no way serves; their commutes and outings across have
+  no car and no walkers either (T-2216). A ferry is no link.
 - **Air door to door** (T-378, docs/regional.md 5.1). Between far places (250 km and more) that both
   have airports: drives to the airports, 135 minutes there for both ends together (90 before departure and 45 after landing, Monmousseau et al. 2021; T-1564, Anita 2026-10-27), 25 minutes
   until the flight (its frequency unmodelled: rail's planned first wait at a flight every 2 hours,

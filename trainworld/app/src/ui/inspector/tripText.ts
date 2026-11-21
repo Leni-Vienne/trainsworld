@@ -80,6 +80,7 @@ const TERM_KEYS: Record<string, MessageKey> = {
   change: "tripText.termChange",
   fare: "tripText.termFare",
   "transfer fare": "tripText.termTransferFare",
+  "first to come": "tripText.termFirstToCome",
   "choice of routes": "tripText.termChoiceOfRoutes",
   parking: "tripText.termParking",
   ownership: "tripText.termOwnership",
@@ -90,6 +91,7 @@ const TERM_KEYS: Record<string, MessageKey> = {
   "at the airports": "tripText.termAtAirports",
   "until the flight": "tripText.termUntilFlight",
   flight: "tripText.termFlight",
+  stairs: "trip.stairs",
 };
 export const termLabel = (id: string, vehicle: string = "train"): string => (TERM_KEYS[id] ? t(TERM_KEYS[id], { vehicle }) : id);
 
@@ -139,9 +141,6 @@ export const tripWords = (f: PurposeFilter): string => t("tripText.tripsWords", 
 export const tripsAmount = (amount: string, n: number, f: PurposeFilter): string =>
   t("tripText.tripsAmount", { kind: kind(f), words: f === "all" ? "" : purposeWords(f), amount, count: Math.round(n) });
 
-/** Felt minutes a bus or ferry boarding adds to a ride's perceived wait: sim/src/demand/kernel/access.rs `BUS_BOARD_MIN`. */
-export const BUS_BOARD_FELT_MIN = 4;
-
 /** The hover of a ride in a route: its wait, its ride and its stops, in minutes to one decimal. `row`
  * is the line's stats (its bus row, a ferry's too, or its tram flag), `full` the wait for a train with room (T-842), `late` the
  * extra felt wait of trips starting when no train is due for hours; both 0 where the panel gives
@@ -149,5 +148,5 @@ export const BUS_BOARD_FELT_MIN = 4;
 export function rideTip(l: TripLeg, st: { bus?: { ferry?: unknown }; tram?: boolean } | undefined, full = 0, late = 0): string {
   const bus = !st ? false : st.bus ? (st.bus.ferry ? "boat" : true) : st.tram ? "tram" : false;
   const v = { bus, wait: minFix1(l.waitMin - full), full: full >= 0.05, fullMin: minFix1(full), ride: minFix1(l.min), stops: l.stops };
-  return t("tripText.rideTip", v) + (late >= 0.05 ? t("tripText.rideTipLate", { bus, min: minFix1(late) }) : "");
+  return t(l.plannedFrom ? "tripText.rideTipPlanned" : "tripText.rideTip", v) + (late >= 0.05 ? t("tripText.rideTipLate", { bus, min: minFix1(late) }) : "");
 }

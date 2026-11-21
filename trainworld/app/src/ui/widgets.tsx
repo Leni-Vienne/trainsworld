@@ -12,6 +12,7 @@ import { LINE_SHAPES, type LineShape, type PickShape } from "../game/lineShape";
 import { LEVELS, type Level, type LineInput } from "../game/types";
 import { selection, uiScale, type ListSort } from "../game/ui";
 import { knock } from "../game/world";
+import { transitParts, type TransitShares } from "../game/transitModes";
 import type { Signal } from "@preact/signals";
 import { t, type MessageKey } from "../i18n";
 import { mobileDevice } from "../workers/deviceMemory";
@@ -25,6 +26,8 @@ export const Icon = {
   pencil: () => <svg viewBox="0 0 16 16"><path d="M10.5 3l2.5 2.5L6 12.5H3.5V10z" /></svg>,
   /** T-3740: the Fare zones tool's paint brush */
   brush: () => <svg viewBox="0 0 16 16"><path d="M13.5 2.5L7.6 8.4M7.6 8.4c-1.7-.5-3.4.7-3.4 2.6 0 1.1-.6 1.8-1.7 2.2 2.6 1 6 .3 6.3-2.6z" /></svg>,
+  /** T-3740: set fare zones by distance, rings around a center */
+  rings: () => <svg class="rings-icon" viewBox="0 0 16 16"><circle cx="8" cy="8" r="1.2" /><circle cx="8" cy="8" r="3.8" /><circle cx="8" cy="8" r="6.3" /></svg>,
   check: () => <svg viewBox="0 0 16 16"><path d="M3.5 8.5l3 3 6-7" /></svg>,
   // the station name's suggestions, round and round
   cycle: () => <svg viewBox="0 0 16 16"><path d="M12.8 6.5A5 5 0 004 5M3.2 9.5A5 5 0 0012 11M4 2v3h3M12 14v-3H9" /></svg>,
@@ -132,6 +135,8 @@ export const Icon = {
   ride: () => <svg viewBox="0 0 16 16"><path d="M1.8 11.2V8.4l1.6-3.4h9.2l1.6 3.4v2.8zM1.8 8.4h12.4" /><circle cx="4.8" cy="11.4" r="1.3" class="bg" /><circle cx="11.2" cy="11.4" r="1.3" class="bg" /></svg>,
   // an inter-region trip's modes (with `ride` for the car)
   train: () => <svg viewBox="0 0 16 16"><rect x="3.8" y="1.8" width="8.4" height="9.7" rx="2" /><path d="M3.8 7h8.4M6 14.2l1-2.7M10 14.2l-1-2.7" /></svg>,
+  // T-3798: a high-speed train's long nose, side on, over the rail
+  highSpeed: () => <svg viewBox="0 0 16 16"><path d="M1.5 11.5h9.6c2 0 3.4-.7 3.4-1.7 0-1.4-3-3.9-6.8-4.3H1.5zM9 5.8l1.6 2.6h2.8M1.5 13.8h13" /></svg>,
   plane: () => <svg viewBox="0 0 16 16"><path d={PLANE_PATH} /></svg>,
   // an alert's mark, a circled exclamation point, coloured by its severity
   alert: () => <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.2" /><path d="M8 4.6v3.2" /><circle class="solid" stroke="none" cx="8" cy="11.1" r="1.4" /></svg>,
@@ -174,7 +179,8 @@ export const Icon = {
 /** A line's bullet (T-521). Everywhere it is drawn a hover names the line and a click selects it,
  * except `plain` (the selected line's own panel, a search row that is the line). `pick` replaces
  * the selecting. `gone`: hidden but keeping its space (a station row's bullets past its "+", T-530). */
-export function Chip({ line, size = "", plain, pick, gone, tip }: { line: LineInput; size?: "" | "sm" | "lg"; plain?: boolean; pick?: (l: LineInput) => void; gone?: boolean; tip?: string }) {
+/** `rim`: a thin rim in the page's colour around the bullet, so bullets drawn over each other read as many (T-3817). */
+export function Chip({ line, size = "", plain, pick, gone, tip, rim }: { line: LineInput; size?: "" | "sm" | "lg"; plain?: boolean; pick?: (l: LineInput) => void; gone?: boolean; tip?: string; rim?: boolean }) {
   const click = plain ? undefined : (e: MouseEvent) => {
     e.stopPropagation();
     if (pick) pick(line);
@@ -186,10 +192,11 @@ export function Chip({ line, size = "", plain, pick, gone, tip }: { line: LineIn
   const b0 = bulletTextSoon(line.letter, size, zoom.value), b = b0 && bulletDraw(b0, shape);
   const idle = isIdleLine(line.id);
   return (
-    <span ref={zoom.ref} class={"chip " + size + (plain ? "" : " link") + (shape === "square" ? " square" : "") + (shape === "outline" ? " ring" : "") + (idle ? " idle" : "")} style={{ "--c": line.colour, "--ct": inkOn(line.colour), visibility: gone ? "hidden" : undefined }}
+    <span ref={zoom.ref} class={"chip " + size + (plain ? "" : " link") + (shape === "square" ? " square" : "") + (shape === "outline" ? " ring" : "") + (idle ? " idle" : "") + (rim ? " rimmed" : "")} style={{ "--c": line.colour, "--ct": inkOn(line.colour), visibility: gone ? "hidden" : undefined }}
       data-tip={plain ? undefined : (tip ?? line.name) + (idle ? "\n" + IDLE_TIP : "")} onClick={click}>
       {b ? (
         <svg style={{ width: b.w + "px", height: b.h + "px" }}>
+          {rim && <BulletRim b={b} />}
           <BulletOutline b={b} />
           <text x={b.x} y={b.y}>{line.letter}</text>
         </svg>
@@ -224,6 +231,11 @@ export function ShapePicker({ value, onChange, colour, tips }: { value: LineShap
 const BulletOutline = ({ b }: { b: BulletDraw }) =>
   b.path ? <path d={b.path.d} stroke-width={b.path.stroke} /> : b.rect!.ring !== undefined ? <rect class="ring" x={b.rect!.x} y={b.rect!.y} width={b.rect!.w} height={b.rect!.h} rx={b.rect!.r} stroke-width={b.rect!.ring} />
   : <rect y={b.rect!.y} width={b.rect!.w} height={b.rect!.h} rx={b.rect!.r} />;
+
+/** T-3817: the same outline a pixel wider all round, filled and stroked in the page's colour, under the bullet. */
+const BulletRim = ({ b }: { b: BulletDraw }) =>
+  b.path ? <path class="bullet-rim" d={b.path.d} stroke-width={b.path.stroke + 2} /> : b.rect!.ring !== undefined ? <rect class="bullet-rim" x={b.rect!.x} y={b.rect!.y} width={b.rect!.w} height={b.rect!.h} rx={b.rect!.r} stroke-width={b.rect!.ring + 2} />
+  : <rect class="bullet-rim" y={b.rect!.y} width={b.rect!.w} height={b.rect!.h} rx={b.rect!.r} stroke-width={2} />;
 
 /** The CSS zoom an element is drawn at (the panels are zoomed by the UI scale, T-247): the UI scale
  * until it is in the page, then what the browser reports, so a bullet's baseline lands on a whole
@@ -320,11 +332,11 @@ export function TypedValue(p: { label: string; type: { text: string; set: (v: nu
 
 /** Buttons sharing borders, one of them on. */
 /** `tips`: a hover for the options that have one */
-export function Segmented<T>(p: { options: [T, ComponentChildren][]; value: T; onChange: (v: T) => void; tips?: (v: T) => string | undefined }) {
+export function Segmented<T>(p: { options: [T, ComponentChildren][]; value: T; onChange: (v: T) => void; tips?: (v: T) => string | undefined; disabled?: (v: T) => boolean }) {
   return (
     <div class="group">
       {p.options.map(([v, label]) => (
-        <button class={"btn" + (v === p.value ? " on" : "")} data-tip={p.tips?.(v)} onClick={() => p.onChange(v)}>
+        <button class={"btn" + (v === p.value ? " on" : "")} data-tip={p.tips?.(v)} disabled={p.disabled?.(v)} onClick={() => p.onChange(v)}>
           {label}
         </button>
       ))}
@@ -348,20 +360,25 @@ export function Check(p: { checked: boolean; onChange: (v: boolean) => void; chi
  * over the figures. */
 /** `hand` (T-1813): the list is in the player's own order, so no column is on; a click sorts again
  * and calls it to drop the order. */
-export function SortHead<K extends string>({ sort, cols, hand }: { sort: Signal<ListSort<K>>; cols: { key: K; label: string; tip: string; first: 1 | -1; cls?: string; left?: boolean }[]; hand?: () => void }) {
+/** `beside` (T-3798): a header with no column under it, set right after the first one's label. */
+export function SortHead<K extends string>({ sort, cols, hand }: { sort: Signal<ListSort<K>>; cols: { key: K; label: string; tip: string; first: 1 | -1; cls?: string; left?: boolean; beside?: boolean }[]; hand?: () => void }) {
   const s = sort.value;
+  const btn = (c: (typeof cols)[number]) => {
+    const on = !hand && s.key === c.key;
+    const arrow = <i class={"sort-arrow" + (on ? (s.dir > 0 ? " up" : " down") : "")} />;
+    return (
+      <button key={c.key} class={"sort-btn" + (c.beside ? (c.cls ? " " + c.cls : "") : c.cls ? " val " + c.cls : " grow") + (on ? " on" : "")} data-tip={c.tip}
+        onClick={() => { hand?.(); sort.value = on ? { key: c.key, dir: s.dir === 1 ? -1 : 1 } : { key: c.key, dir: c.first }; }}>
+        {c.cls && !c.left && !c.beside && arrow}{c.label}{(!c.cls || c.left || c.beside) && arrow}
+      </button>
+    );
+  };
+  const beside = cols.filter((c) => c.beside);
+  if (!beside.length) return <div class="sort-head">{cols.map(btn)}</div>;
   return (
     <div class="sort-head">
-      {cols.map((c) => {
-        const on = !hand && s.key === c.key;
-        const arrow = <i class={"sort-arrow" + (on ? (s.dir > 0 ? " up" : " down") : "")} />;
-        return (
-          <button class={"sort-btn" + (c.cls ? " val " + c.cls : " grow") + (on ? " on" : "")} data-tip={c.tip}
-            onClick={() => { hand?.(); sort.value = on ? { key: c.key, dir: s.dir === 1 ? -1 : 1 } : { key: c.key, dir: c.first }; }}>
-            {c.cls && !c.left && arrow}{c.label}{(!c.cls || c.left) && arrow}
-          </button>
-        );
-      })}
+      <span class="sort-lead">{btn(cols[0])}{beside.map(btn)}</span>
+      {cols.slice(1).filter((c) => !c.beside).map(btn)}
     </div>
   );
 }
@@ -401,6 +418,12 @@ export function SegBar({ parts, kind, label }: { parts: { share: number; cls?: s
       ))}
     </div>
   );
+}
+
+/** T-3695: a mode split bar's transit part, `train` % wide: one segment, or with `shares` one per kind of line. */
+export function TransitSegs({ train, shares }: { train: number; shares: TransitShares | null }) {
+  if (!shares) return <i class="seg seg-train" style={{ width: train + "%" }} />;
+  return <>{transitParts(train, shares).map((p) => <i key={p.mode} class="seg" style={{ width: p.n + "%", background: p.colour }} />)}</>;
 }
 
 /** The elevation buttons in the level colours, `value` on; `tip` words each hover; `levels`, only those. */

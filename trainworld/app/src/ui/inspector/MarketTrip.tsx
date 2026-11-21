@@ -4,7 +4,8 @@
 // train's routes are the market's own through the period's strategies; the walks or drives to the
 // stations are known only as felt minutes, averaged over the area.
 
-import { activeCity, cityById } from "../../game/cities";
+import { activeCity, CITIES, cityById } from "../../game/cities";
+import { faresIn } from "../../game/fareDefault";
 import { count, distance, distUnit, exact, moneyWhole, perDistance, roughDistance, smallMoney, speed, unitWeight, usingUsd } from "../../game/format";
 import {
   AIR_FARE_USD, AIR_FIXED_MIN, AIR_KMH, AIR_NO_DIRECT_MIN, AIR_TERMINAL_MIN, AIR_USD_PER_KM, AIR_WAIT_MIN, CAR_KMH, CAR_SHARED_BY, carPartsOf, corridorOf,
@@ -16,12 +17,13 @@ import { modeColours } from "../../game/palette";
 import { PERIODS } from "../../game/periods";
 import { intercityDemand, intercityPlaceName } from "../../game/demand";
 import { pairFigures as pairOf, type PairTrips } from "../../game/corridorFigures";
-import { baseFareOf, peopleOf, routeTerms, tripPeriod, wholePeople, type MarketEnd, type MarketPeriod, type MarketShown, type TripRoute } from "../../game/trip";
+import { baseFareOf, peopleOf, plannedFirstWait, routeTerms, tripPeriod, wholePeople, type MarketEnd, type MarketPeriod, type MarketShown, type TripRoute } from "../../game/trip";
 import { shownDayPhrase } from "../../game/ui";
 import { linesById, stationNames, world } from "../../game/world";
 import { lowerWord, t as tr, tRich, tSeries } from "../../i18n";
 import { shownPeriod } from "../../map/tripView";
 import { SegBar } from "../widgets";
+import { transitParts, tripTransit } from "../../game/transitModes";
 import { legRows, PeriodRows, routeRow, StationLink } from "./RouteParts";
 import { equation, minNum1, minRound, minText, modeName, num1, pct1, pctShare, rideTip, roundTo, termLabel, usd, type ModeId, type Term } from "./tripText";
 
@@ -61,8 +63,9 @@ function carEquation(c: CarCost): string {
 }
 
 /** The train's effective time as an equation (T-3404): the main route's terms in the order of the rows, with
- * the walks as the felt minutes the market knows them by, and the model's figure, which pools every route
- * the riders use, as the last term. */
+ * the walks as the felt minutes the market knows them by, adding up to the route's own sum. T-3822: the
+ * model's figure is the mean over every trip between the two ends, by trips, not riders, on zone pairs that
+ * each pool their own stations and routes, so no term takes the route to it; a line says what it is. */
 function trainEquation(t: MarketPeriod, r: TripRoute, sc: number, w: number): string {
   const felt = { ...t, pairs: t.pairs.map((p) => ({ ...p, accessMin: p.accessPerceived, egressMin: p.egressPerceived })) };
   const terms: Term[] = routeTerms(felt, r).filter((x) => x.perceived !== 0 || x.unit === "usd").map((x) => {
@@ -77,10 +80,7 @@ function trainEquation(t: MarketPeriod, r: TripRoute, sc: number, w: number): st
       ...(x.unit === "usd" ? { usd: true } : {}),
     };
   });
-  const rest = t.railPerceived - terms.reduce((s, x) => s + x.perceived, 0);
-  // i18n-ignore: term id
-  if (Math.abs(rest) >= 0.05) terms.push({ label: termLabel("choice of routes"), real: "", weight: 1, perceived: rest });
-  return equation(terms, t.railPerceived) + (Math.abs(rest) >= 0.05 ? "\n" + tr("tripInspector.choiceOfRoutes") : "");
+  return `${equation(terms)}\n${tr("marketTrip.routeOwn")}`;
 }
 
 /** By car: the drive, its running costs, parking, any crossing, and the effective time. `parts`
@@ -365,7 +365,9 @@ function noRailText(why: MarketPeriod["why"]): string {
 
 export function MarketTrip({ m }: { m: MarketShown }) {
   const q = shownPeriod.value;
-  const t = m.periods[q];
+  const t0 = m.periods[q];
+  // T-3823: the routes' first wait as the market costs it
+  const t = t0 && { ...t0, routes: t0.routes.map(plannedFirstWait) };
   const day = shownDayPhrase.value;
   const period = PERIODS[q].name;
   // T-1148: between two places both ways, as the city view's corridors count them; from a selection
@@ -424,11 +426,17 @@ export function MarketTrip({ m }: { m: MarketShown }) {
   });
   const commuters = m.near ? tr("marketTrip.bothWays") : m.end === "work" ? tr("marketTrip.whoWork", { far }) : tr("marketTrip.whoHome", { far });
   const of = tr("marketTrip.of", { counted: all >= 0.5, amount: count(all), day });
+  // T-3695: with the setting on, the train part by the kinds of line its routes ride, by leg length
+  const kinds = tripTransit(t.routes);
+  const segs = shares.flatMap(([n, v, c]) => (n === "train" && kinds ? transitParts(v, kinds).map((p) => ({ name: p.name, share: p.n, colour: p.colour })) : [{ name: modeName(n), share: v, colour: c }]))
+    .map((p) => ({ ...p, tip: tr("tripText.modeOf", { mode: p.name, share: pctShare(p.share), of }) }));
   const main = t.routes[0];
   const tm = main ? stationTimes(main) : null;
   // T-1277: the market prices the curve as set; a trip pays it times its starting country's scale
   const start = m.end === "work" ? one : ends.near;
-  const sc = fareScale(start >= 0 ? marketRow(start)?.country : undefined, moneyState.value?.fares.scales);
+  // T-3766: with fares by city, its starting city's
+  const startFares = moneyState.value?.fares;
+  const sc = fareScale(start >= 0 ? marketRow(start)?.country : undefined, startFares && faresIn(startFares, start >= 0 ? CITIES.find((c) => c.place === start)?.id : null).scales);
   const fare = main ? (sc * (baseFareOf(t, main) + main.legs.reduce((s, l) => s + l.farePerceived, 0))) / t.minPerUsd : 0;
   const periodLow = lowerWord(period);
   // T-3374: the routes are the longer trips' while any ride, else every kind's (the sim's
@@ -460,8 +468,7 @@ export function MarketTrip({ m }: { m: MarketShown }) {
       )}
       {shares.length > 0 && (
         <div class="trip-modes">
-          <SegBar kind="trip-bar" label={tSeries(shares.map(([n, v]) => tr("tripText.modeShare", { mode: modeName(n), share: pctShare(v) })))}
-            parts={shares.map(([n, v, c]) => ({ share: v, colour: c, tip: tr("tripText.modeOf", { mode: modeName(n), share: pctShare(v), of }) }))} />
+          <SegBar kind="trip-bar" label={tSeries(segs.map((p) => tr("tripText.modeShare", { mode: p.name, share: pctShare(p.share) })))} parts={segs} />
           <ul class="rows">
             {shares.filter(([n, v]) => n !== "plane" || v > 0).map(([n, v, c, e]) => (
               <li data-tip={`${tr("tripText.modeOf", { mode: modeName(n), share: pctShare(v), of })}\n${tr("tripText.modelLine", { share: pct1(e) })}`}>

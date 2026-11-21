@@ -19,7 +19,7 @@ import registry from "../game/registry.json";
 import successors from "../game/zone-successors.json";
 import { zoneName } from "../game/zoneNames";
 import { compressGzip, decompressGzip } from "./gzip";
-import { GZIP_DAMAGED } from "./gzipCore";
+import { compressGzipParts, GZIP_DAMAGED } from "./gzipCore";
 import { editOf } from "./versions";
 import type { LineShape } from "../game/lineShape";
 
@@ -111,10 +111,13 @@ export interface SaveHeader {
   fleetBus?: number;
   /** T-2194: boats owned; absent for none */
   fleetFerry?: number;
+  /** T-3892: Small and Large boats owned (`fleetFerry` is Medium's); absent for none */
+  fleetFerrySmall?: number;
+  fleetFerryLarge?: number;
   /** T-2926: tram cars owned; absent for none */
   fleetTram?: number;
   /** fare curve (game/fareCurve.ts): its first stretch as a base and rate, and its nodes (none in a save from before T-883) */
-  fares: { base: number; perKm: number; nodes?: [number, number][]; scales?: Record<string, number>; baseline?: string; basis?: "usd"; income?: number; hsr?: number; ferry?: number; bus?: number; transfer?: number; ref?: string; lines?: Record<string, number>; zones?: { id: number; name: string; prices: number[]; off?: boolean }[]; zoneNext?: number };
+  fares: { base: number; perKm: number; nodes?: [number, number][]; scales?: Record<string, number>; byCity?: boolean; cityScales?: Record<string, number>; baseline?: string; basis?: "usd"; income?: number; hsr?: number; ferry?: number; ferrySmall?: number; ferryLarge?: number; bus?: number; transfer?: number; ref?: string; lines?: Record<string, number>; zones?: { id: number; name: string; prices: number[]; off?: boolean }[]; zoneNext?: number };
   /** recent days, oldest first (today last) */
   ledger: DayLedger[];
   /** recent hours, oldest first (T-447; absent in older saves) */
@@ -136,6 +139,8 @@ export interface SaveHeader {
   shapes?: Record<string, LineShape>;
   /** T-3420: the ids of the lines the player hid on the map; absent for none (older saves too) */
   hidden?: string[];
+  /** T-3409: the zones the schematic is of; absent for the whole network (older saves too); `[NO_CITIES]` for none (T-3886) */
+  schematic?: string[];
   /** T-728: absent in older saves, read as "normal" */
   mode?: GameMode;
   /** T-728: the zone the game started in; absent for a start on the world map and in older saves */
@@ -189,7 +194,7 @@ export interface GuideSave { done: number; hidden?: true; closed?: true; card?: 
 /** T-1826: every header field this build reads, so a field added to `SaveHeader` must be listed. */
 const HEADER_FIELDS: Record<keyof SaveHeader, true> = {
   game: true, format: true, city: true, region: true, cities: true, clock: true, cash: true, loan: true, loanPay: true, loanDays: true, fleet: true, fleetFast: true,
-  fleetBus: true, fleetFerry: true, fleetTram: true, fares: true, ledger: true, hours: true, regions: true, lineDays: true, stars: true, goals: true, notes: true, shapes: true, hidden: true, mode: true, start: true,
+  fleetBus: true, fleetFerry: true, fleetFerrySmall: true, fleetFerryLarge: true, fleetTram: true, fares: true, ledger: true, hours: true, regions: true, lineDays: true, stars: true, goals: true, notes: true, shapes: true, hidden: true, schematic: true, mode: true, start: true,
   dayShift: true, opened: true, demandFine: true, demandBuilt: true, newCars: true, newHeadway: true, newWeekendShare: true, level: true, guide: true, achievements: true, home: true, copy: true, modded: true,
 };
 /** T-3115: the header fields, for checking a stranger's save (game/sharedSave.ts) */
@@ -294,8 +299,10 @@ export function isRetiredTrackFormat(track: Uint8Array): boolean {
   return m === "TWT2" || m === "TWT3";
 }
 
-/** Header and network bytes -> the compressed file. */
+/** Header and network bytes -> the compressed file. In a worker (the clock worker's saves) it is made in parts
+ * (`encodeSaveParts`) and joined; on the page the codec worker packs it. */
 export async function encodeSave(h: SaveHeader, track: Uint8Array): Promise<Uint8Array> {
+  if (typeof document === "undefined") return joinParts(encodeSaveParts(h, track));
   const json = new TextEncoder().encode(JSON.stringify(h));
   const raw = new Uint8Array(8 + json.length + track.length);
   raw.set(new TextEncoder().encode(SAVE_MAGIC), 0);
@@ -303,6 +310,70 @@ export async function encodeSave(h: SaveHeader, track: Uint8Array): Promise<Uint
   raw.set(json, 8);
   raw.set(track, 8 + json.length);
   return compressGzip(raw);
+}
+
+/** T-3869: a buffer the save asks for, refused as a browser short of memory refuses one; checks only
+ * (`refuseSaveBuffers`), null otherwise */
+let refuse: ((bytes: number) => boolean) | null = null;
+export function refuseSaveBuffers(f: ((bytes: number) => boolean) | null) { refuse = f; }
+/** V8's own words for a buffer it could not get */
+export const NO_BUFFER = "Array buffer allocation failed"; // i18n-ignore: an engine's error text
+function room(n: number) { if (refuse?.(n)) throw new RangeError(NO_BUFFER); }
+
+/** T-3869: the compressed file in parts of at most GZ_PART bytes, the same bytes `encodeSave` gives joined, without
+ * the file or the bytes it packs ever held whole: the header is written out a piece at a time (`savePieces`). Worker
+ * only (it compresses on the thread that calls it). */
+export function encodeSaveParts(h: SaveHeader, track: Uint8Array): Uint8Array<ArrayBuffer>[] {
+  room(track.length);
+  const json = JSON.stringify(h);
+  return compressGzipParts(() => savePieces(json, track), room);
+}
+
+/** The file's bytes before compression, in pieces: the magic and the header's length, the header (UTF-8, at most
+ * 16,384 characters a piece in one reused buffer, so each piece is read before the next is made), the network. */
+function* savePieces(json: string, track: Uint8Array): Generator<Uint8Array> {
+  const length = utf8Length(json);
+  const head = new Uint8Array(8);
+  head.set(MAGIC_BYTES, 0);
+  new DataView(head.buffer).setUint32(4, length, true);
+  yield head;
+  const enc = new TextEncoder(), buf = new Uint8Array(3 * JSON_PIECE);
+  let written = 0;
+  for (let i = 0; i < json.length;) {
+    let j = Math.min(json.length, i + JSON_PIECE);
+    if (j < json.length && (json.charCodeAt(j - 1) & 0xfc00) === 0xd800) j--; // a surrogate pair stays whole
+    const n = enc.encodeInto(json.slice(i, j), buf).written;
+    written += n;
+    i = j;
+    yield buf.subarray(0, n);
+  }
+  if (written !== length) throw new Error("The save's header changed length as it was written."); // i18n-ignore: internal
+  if (track.length) yield track;
+}
+const JSON_PIECE = 16384;
+const MAGIC_BYTES = new TextEncoder().encode(SAVE_MAGIC);
+/** bytes `TextEncoder` makes of `s` (a lone surrogate becomes U+FFFD, 3 bytes) */
+function utf8Length(s: string): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if ((c & 0xfc00) === 0xd800 && i + 1 < s.length && (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00) { n += 4; i++; }
+    else n += 3;
+  }
+  return n;
+}
+
+/** Parts as one buffer (what a slot keeps) */
+export function joinParts(parts: Uint8Array[]): Uint8Array<ArrayBuffer> {
+  let n = 0;
+  for (const p of parts) n += p.length;
+  room(n);
+  const out = new Uint8Array(n);
+  n = 0;
+  for (const p of parts) { out.set(p, n); n += p.length; }
+  return out;
 }
 
 /** T-3395: the message key a damaged save's load throws (a gzip that does not unpack to its end, a header
@@ -743,6 +814,7 @@ export async function deleteSlot(key: string): Promise<void> {
   await req(s.delete(key));
   await req(s.delete(SYNC_PREFIX + key));
   await req(s.delete(AHEAD_PREFIX + key));
+  await req(s.delete(OLD_FRAME_PREFIX + key));
   // and its demand cache (T-328), backups (T-744) and copies kept aside as unreadable (T-743, T-3395)
   for (const k of await req(s.getAllKeys())) if (typeof k === "string" && (k.startsWith(`${DEMAND_PREFIX}${key}:`) || k.startsWith(`${BACKUP_PREFIX}${key}:`) || (k.startsWith(UNREADABLE_PREFIX) && k.endsWith(":" + key)))) s.delete(k);
   await done;
@@ -752,11 +824,20 @@ export async function deleteSlot(key: string): Promise<void> {
 // T-1827 kept deleted slots 30 days under `deleted:<ms>-<id>` (backups `backup:deleted:...`); Anita
 // removed it the same day (a deleted game should be gone for good). Anything it left is swept at start.
 const DELETED_PREFIX = "deleted:", DELETED_BACKUP = "backup:deleted:";
+/** `old-frame-<slot>`: the slot's save as it was before a load converted it (one per slot, replaced by the next
+ * conversion); it goes with its slot (`deleteSlot`, and `sweepDeleted` for any left behind) */
+export const OLD_FRAME_PREFIX = "old-frame-";
 export async function sweepDeleted(): Promise<void> {
   try {
     const s = await store("readwrite");
     const done = committed(s.transaction);
-    for (const k of await req(s.getAllKeys())) if (typeof k === "string" && (k.startsWith(DELETED_PREFIX) || k.startsWith(DELETED_BACKUP))) s.delete(k);
+    const keys = (await req(s.getAllKeys())).filter((k): k is string => typeof k === "string");
+    const slots = new Set(keys);
+    for (const k of keys) {
+      if (k.startsWith(DELETED_PREFIX) || k.startsWith(DELETED_BACKUP)) s.delete(k);
+      // the old-format copy of a slot that is no longer there (kept one per slot, deleted with it)
+      else if (k.startsWith(OLD_FRAME_PREFIX) && !slots.has(k.slice(OLD_FRAME_PREFIX.length))) s.delete(k);
+    }
     await done;
   } catch { /* storage unavailable */ }
 }
@@ -1053,3 +1134,6 @@ export async function leaseSlot(key: string, steal = false): Promise<SlotLease |
     }).catch((err) => { if (granted) lose(); else reject(err); });
   });
 }
+
+/** T-3886: the schematic's saved choice when every city is unticked; an empty choice is the whole network */
+export const NO_CITIES = "none";

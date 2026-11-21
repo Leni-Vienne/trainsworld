@@ -5,7 +5,7 @@ import type { FareArea } from "../game/fareCurve";
 import { PERIODS } from "../game/periods";
 
 /** `DemandApi.trip`'s answer layout (sim/src/demand/trip.rs `HEAD`, `PAIR_LEN`, `LEG_LEN`). */
-export const TRIP_LAYOUT = { HEAD: 48, PAIR_LEN: 20, LEG_LEN: 15 } as const;
+export const TRIP_LAYOUT = { HEAD: 48, PAIR_LEN: 20, LEG_LEN: 16 } as const;
 /** `IntercityApi::market_trip`'s answer: `MT_HEAD` and `MT_PAIR_LEN` in market_trip.rs. */
 export const MARKET_TRIP_LAYOUT = { HEAD: 25, PAIR_LEN: 7 } as const;
 // Messages between the main thread and the demand workers (T-026, T-021; notes/T-026.md).
@@ -52,7 +52,7 @@ export interface DemandNetwork {
   tph: Float32Array;
   /** cars per train, per line */
   cars: Float32Array;
-  fare: { base: number; perKm: number; nodes?: [number, number][]; scales?: Record<string, number>; hsr?: number; ferry?: number; bus?: number; transfer?: number; lines?: Record<string, number>; zones?: FareArea[] };
+  fare: { base: number; perKm: number; nodes?: [number, number][]; scales?: Record<string, number>; byCity?: boolean; cityScales?: Record<string, number>; hsr?: number; ferry?: number; ferrySmall?: number; ferryLarge?: number; bus?: number; transfer?: number; lines?: Record<string, number>; zones?: FareArea[] };
   /** T-3740 (`DemandApi.set_fare_zones`): each station's fare zone code (game/fareZones.ts, the fare area's id), 0
    * for none; absent where none has one */
   fz?: Uint32Array;
@@ -88,6 +88,10 @@ export interface DemandNetwork {
   ferry?: Uint8Array;
   /** T-2926 (`DemandApi.set_tram_lines`): 1 for each tram line, 0 for the rest; absent with none */
   tram?: Uint8Array;
+  /** T-3888 (`set_stairs`): 1 for each ferry line, whose trips pay no stairs; absent with none */
+  pierLines?: Uint8Array;
+  /** T-3888 (`set_stairs`): per stop (as `stops`), 1 where its platform is at grade and pays no stairs */
+  gradeStops?: Uint8Array;
 }
 
 /** T-377: a zone's part of the world market (`data/packs/<id>.market.json`). */
@@ -141,8 +145,6 @@ export type ToDemand =
   | { kind: "init"; packs: { id: CityId; header: string; bin: ArrayBuffer }[]; intercity?: MarketPack[]; rows?: MarketRows; periods: number[]; aux?: boolean;
       /** T-173: open a small synthetic everyday layer first (`everyday_warm_up`), before `ready` */
       warmEveryday?: boolean;
-      /** T-2596: every zone's bubble sums pushed each round, not only the zones on screen (`?perfOff=allSums`) */
-      allSums?: boolean;
       /** T-2802: the least the WASM memory grows by, bytes (`heapStep` in deviceMemory.ts) */
       heapStep?: number;
       /** T-325, the aux worker: each solving worker's periods, in worker order, so a zone it holds
@@ -206,12 +208,6 @@ export type ToDemand =
       freshParts?: boolean;
       /** T-1862 `?perfOff=noise`: a cluster keeps its result only on exactly the network it solved */
       exactKeep?: boolean;
-      /** T-3512 `?perfOff=localKeep`: an edit's local solve solves every period of the touched
-       * populations, the unchanged ones too, and the whole solve after it solves them again */
-      localAll?: boolean;
-      /** T-3512 `?perfOff=localSkip`: an edit's touched populations are solved locally first however
-       * much of the cluster's work they are */
-      alwaysLocal?: boolean;
       /** T-3512, dev `?localShare=a,b`: solving worker i's own `LOCAL_SHARE_MAX`, so two workers can be
        * made to disagree (one solving locally, one going straight to the whole solve) */
       localShare?: number[];

@@ -15,7 +15,7 @@
 //! A pack in the old single-pack form (`sites` with a market column: the tests' fixtures) opens as
 //! a closed world over its own zones with the ground curve alone.
 use super::{
-    api::{check_fare_curve, demand_back, demand_catches, demand_groups, demand_passages, demand_ups, fare_x_usd, merge_stations, put_fares, check_fare_mul, same_bits, span_for, scale_triples, DemandApi, Service, FARE_MIN_PER_USD, PEAK_HOUR_FACTOR, TO_HOME, TO_WORK},
+    api::{check_fare_curve, demand_back, demand_catches, demand_groups, demand_passages, demand_ups, fare_x_usd, pier_lines, merge_stations, put_fares, check_fare_mul, same_bits, span_for, scale_triples, DemandApi, Service, FARE_MIN_PER_USD, PEAK_HOUR_FACTOR, TO_HOME, TO_WORK},
     clock::now_ms,
     days::{everyday as everyday_purpose, lean_sign, load_factor, share_out, share_ret, LONGER, WEEKDAY, WORK},
     everyday::{car_mul, KIND_COUNT, OUTWARD, RETURN},
@@ -330,6 +330,45 @@ struct ZoneRaw {
     airports: Vec<[f64; 2]>,
     #[serde(default)]
     air_direct: Vec<Vec<u32>>,
+    /// T-2213: each 6 km zone's land parts (part, share), most first, and the pack's parts
+    #[serde(default)]
+    zone_parts: Vec<Vec<(u32, f64)>>,
+    #[serde(default)]
+    parts: Option<PartsRaw>,
+    /// T-2213: each site's part
+    #[serde(default)]
+    site_part: Vec<u32>,
+}
+/// T-2213: a pack's land parts (`parts` in its zone file): people, whether the part reaches the
+/// grid's edge (joined beyond it to the rest of its world landmass), its world landmass.
+#[derive(Deserialize, Default)]
+struct PartsRaw {
+    #[serde(default)]
+    people: Vec<f64>,
+    #[serde(default)]
+    open: Vec<u8>,
+    #[serde(default)]
+    landmass: Vec<i64>,
+}
+/// T-2216: a zone on its pack's main part (the most people): its place's landmass (`road`).
+const MAIN_LAND: i64 = i64::MIN;
+/// T-2216 stage 2: each part's land. The pack's main part (most people) `MAIN_LAND`; another part
+/// reaching the grid's edge, or on another world landmass than the main part's, that landmass; else
+/// (an island the world's landmasses fold into the main one's, as Salamis into Greece's) its own
+/// number, `local_land` of the part. None without a valid parts table.
+fn part_lands(parts: Option<&PartsRaw>) -> Option<Vec<i64>> {
+    let pt = parts.filter(|p| !p.people.is_empty() && p.open.len() == p.people.len() && p.landmass.len() == p.people.len())?;
+    let main = (0..pt.people.len()).fold(0, |b, k| if pt.people[k] > pt.people[b] { k } else { b });
+    Some((0..pt.people.len()).map(|p| if p == main { MAIN_LAND } else if pt.open[p] != 0 || pt.landmass[p] != pt.landmass[main] { pt.landmass[p] } else { local_land(p) }).collect())
+}
+/// Each zone's land (`Zone::land`): its main part's (`zone_parts[z][0]`, `part_lands`).
+fn zone_lands(zone_parts: &[Vec<(u32, f64)>], lands: Option<&[i64]>, nz: usize) -> Vec<i64> {
+    let Some(lands) = lands else { return vec![MAIN_LAND; nz] };
+    (0..nz).map(|z| zone_parts.get(z).and_then(|v| v.first()).and_then(|&(p, _)| lands.get(p as usize).copied()).unwrap_or(MAIN_LAND)).collect()
+}
+/// A part's own land number within its pack; `Zone::land` makes it its place's.
+fn local_land(part: usize) -> i64 {
+    -1 - part as i64
 }
 fn one() -> f64 {
     1.
@@ -453,6 +492,10 @@ struct ZoneIn {
     everyday_walk: Vec<f32>,
     airports: Vec<[f64; 2]>,
     air_direct: Vec<Vec<u32>>,
+    /// T-2216: each zone's land (`zone_lands`), the parts' own numbers not yet its place's
+    zone_land: Vec<i64>,
+    /// T-2216: each site's land as `zone_land`; empty when every site is on the main part
+    site_land: Vec<i64>,
 }
 /// A vector with no spare room (parsing grows each by doubling).
 fn tight<T>(mut v: Vec<T>) -> Vec<T> {
@@ -468,6 +511,14 @@ impl From<ZoneRaw> for ZoneIn {
             pop: Col::of(z.sites.iter().map(|s| s[2]).collect()),
             jobs: Col::of(z.sites.iter().map(|s| s[3]).collect()),
             zone: Ix::of(z.sites.iter().map(|s| site_zone(s[4])).collect()),
+        };
+        let lands = part_lands(z.parts.as_ref());
+        let zone_land = zone_lands(&z.zone_parts, lands.as_deref(), z.zones.len());
+        let site_land = match &lands {
+            Some(l) if z.site_part.len() == z.sites.len() && z.site_part.iter().any(|&p| l.get(p as usize).is_some_and(|&x| x != MAIN_LAND)) => {
+                z.site_part.iter().map(|&p| l.get(p as usize).copied().unwrap_or(MAIN_LAND)).collect()
+            }
+            _ => vec![],
         };
         ZoneIn {
             place: z.place,
@@ -497,6 +548,8 @@ impl From<ZoneRaw> for ZoneIn {
             everyday_walk: tight(z.everyday_walk),
             airports: z.airports,
             air_direct: z.air_direct,
+            zone_land,
+            site_land,
         }
     }
 }
@@ -707,10 +760,39 @@ struct Alt {
     air: f32,
     car: f32,
 }
+thread_local! {
+    /// T-2216: tests turn the island rule off on their own thread, to compare the solve without it
+    /// (pairs with no car and no plane then never solved, commutes across water on the ratio curve).
+    pub(super) static ISLANDS_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// T-2216 stage 2: tests turn the zones' own lands off (every zone on its place's landmass, as
+    /// stage 1), to compare.
+    pub(super) static ZONE_LANDS_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// T-2216: whether pairs on two landmasses with no plane are solved by `bound_share` (always, but
+/// in a test that turned it off).
+#[inline]
+fn islands() -> bool {
+    !(cfg!(test) && ISLANDS_OFF.with(|c| c.get()))
+}
+/// T-2216 stage 2: whether a zone off its pack's main land has no car to the rest (always, but in a
+/// test that turned it or the island rule off).
+#[inline]
+fn zone_lands_on() -> bool {
+    islands() && !(cfg!(test) && ZONE_LANDS_OFF.with(|c| c.get()))
+}
 impl PairRule {
-    /// A pair the solve may build: a car or a plane to compete with.
+    /// A car or a plane to compete with.
     fn has_alt(&self) -> bool {
         self.car || self.fl.is_some()
+    }
+    /// T-2216: no car and no plane: rail is the only way, its share `Params::bound_share` against
+    /// a drive over a bridge that is not there (`alt`'s car), the rest no way at all.
+    fn bounded(&self) -> bool {
+        !self.has_alt()
+    }
+    /// A pair the solve may build: any, with a car, a plane or neither (T-2216).
+    fn solved(&self) -> bool {
+        islands() || self.has_alt()
     }
     /// A longer trip's car over a zone pair of this place pair, `d` km apart, to parking `park`.
     fn car_cost(&self, d: f32, park: f32) -> Cost {
@@ -840,6 +922,14 @@ struct Zone {
     dep: f64,
     /// T-1374: how touristy it is (`touristy`)
     tour: f32,
+    /// T-2216 stage 2: its land (`zone_lands`): `MAIN_LAND` (its place's `road`), a world landmass,
+    /// or an island of its pack's own (`place_land`); two zones on two lands have no car between them
+    land: i64,
+}
+/// T-2216: a pack's own island (`local_land`) as a number no other place's island or any world
+/// landmass has.
+fn place_land(place: usize, local: i64) -> i64 {
+    -(1i64 << 40) - ((place as i64) << 16) + local
 }
 /// One place's sites, in its pack's frame: the access search and the rides work in its plane.
 struct Group {
@@ -877,6 +967,10 @@ struct Market {
     comp_of_gid: Vec<u32>,
     groups: Vec<Group>,
     cell_zone: Vec<usize>,
+    /// T-2216 stage 2: the sites off their pack's main part (global site, index into `land_codes`,
+    /// as `Zone::land`), ascending; every other site is on its place's landmass
+    site_land: Vec<(u32, u32)>,
+    land_codes: Vec<i64>,
     site_key: SiteKeys,
     /// commutes: home zone (here), work zone (global id), commuters a day; by home zone and by
     /// work zone (only those open), CSR
@@ -1009,6 +1103,8 @@ struct CPair {
     ride: bool,
     /// the station choice's band by the zones' distance (`Params::band`, T-718)
     band: u8,
+    /// T-2216: its zones on two lands (`Market::zone_rule`): no car, rail by `Params::bound_share`
+    apart: bool,
 }
 /// T-1175: everyday outings between two zones across a zone line: home zone, activity zone (global
 /// id), purpose (`everyday` kind), outings a day, and their share walking with no rail.
@@ -1035,6 +1131,8 @@ struct EPairOn {
     walk_e: f32,
     ride: bool,
     band: u8,
+    /// T-2216: as `CPair::apart` (and no walkers: `everyday`'s walk share is 0 there)
+    apart: bool,
 }
 /// T-276: the commutes between zones are the local layer's commuters, so they choose as it does.
 fn commute_params() -> Params {
@@ -1066,3 +1164,5 @@ pub use api::*;
 mod tests;
 #[cfg(test)]
 mod t2652;
+#[cfg(test)]
+mod t2216;

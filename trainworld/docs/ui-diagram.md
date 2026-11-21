@@ -17,12 +17,19 @@ Its icon is a map folded in three panels (T-2615). Hover: "Show network diagram 
 nothing else is left for it to undo: a question, a drag and the selection come first (`main.ts`, T-2416).
 The diagram is a 2D canvas over the map; the dock and top bar stay, and the map's upper left gives way to
 the diagram's own row (`DiagramTopLeft`): a cross back to the map (hover "Show map (M)", T-2416), the
-water button, the line width slider (hover "Line width", T-2888), the
+mode buttons (below), the cities button ("Chosen cities" below), the water button, the line width slider (hover "Line width", T-2888), the
 save button once a drawing is up, the busy tag, and during the first layout
 the demand status's tag: "Calculating diagram" and a thin loading bar (hover: its
 percent) fed by the layout worker's progress (T-2235; A to 0.2 of the layout, B to 0.7, the routing
 the rest; the layout 0.85 of the whole, the names the last 0.15; a post each percent).
-Drag pans, the wheel zooms about the pointer, drawn once a frame.
+Drag pans, the wheel zooms about the pointer, drawn once a frame. The tag and bar stay up until every region is
+drawn (T-3812): the bar is the regions done plus the one being laid out; a region an older drawing still covers (an
+edit's re-layout) does not count, except after the chosen cities change, when the bar shows from the click until every
+region of the new choice is drawn (T-3825). The wheel stops zooming out where the larger of the drawn network's two
+sides is half the view's matching side (`MIN_SHARE` in `diagram/view.ts`; Anita, 2026-11-20); it follows what is drawn
+now, and the camera can still fit the whole drawing. The view's middle never leaves the drawn box, and the station
+nearest it stays at least 40 px inside the view, so panning cannot take the whole drawing off screen at any zoom (at the
+zoom-out limit all of it stays in view; T-3825). A drawing that fits in the view when the diagram opens is centred whole.
 
 - **The camera** (T-2163): each time it opens it is centred on the selection (a station's complex; for
   a line or group, of its stops the one nearest the map's centre), else on the complex nearest the
@@ -88,6 +95,87 @@ of 0.625 device px, no pills (T-2272).
 The drawing is made in the layout worker and posted with the layout: each line's path as commands,
 made a Path2D on the page when first painted.
 
+## Buses and ferries
+
+`diagram/thin.ts`, `diagram/busGraph.ts` (T-3360; Anita, 2026-11-17: "really thin lines, stops not labelled ... draw them
+as the last step, and not have them impact distortion ... relaxed in cases where people are building bus-only
+networks"). The rail lines alone make the graph, so a network's rail layout is the same with or without its buses.
+
+- **Thin, after the layout.** Once a region is laid out, the page sends the layout worker the bus and ferry lines of that
+  region (a line goes with the region holding most of the stations it stops at, else most of its stops within 0.05
+  degrees of the region's stations' box; `thinInputs` in view.ts), in its graph's metres. Each route is carried through
+  the map the carry made (`carryMap`), moved so it meets the pill of every station it stops at (a ferry port within 400 m
+  of a station drawn there counts as that station) and every other stop's own carried place (a ferry's route ends at its
+  berth, its port is on land), the moves between two stops blended along the way; fitted with runs at 0, 45 and 90
+  degrees between the stations (within 2 pitches, a ferry 4, corners rounded at 2 pitches), and posted back. Nothing is
+  laid out again, and a change to the buses alone asks for this only. The names were placed without them, so a thin line
+  can pass under a name.
+- **A ferry over the drawn water** (T-3824; Anita, 2026-11-20: "draw ferries after drawing water so that their ports
+  actually line up closer to the coastline"): with the water on, the drawn sea, bands and fillets are put on a grid
+  (half a pitch, coarser for a long route) within 12 pitches of the ferry's carried route. Each port that is no station
+  moves onto the drawn coast where its route toward the next stop first meets the water (else the coast within 6
+  pitches); from stop to stop the ferry takes the cheapest way over the grid, land 12 times dearer, so it leaves a
+  station's pill for the water by the shortest way. Fitted at 0, 45 and 90 degrees within 3 pitches of that way, a run
+  kept only where it crosses no more land than the way did (`ferryWater.ts`, thin.ts `overWater`).
+- **Drawn** under the rail lines, whose casings cut them where they cross: 0.3 of a stroke wide in the line's colour, a
+  ferry dashed (1.6 pitches on, 1.1 off); each stop off a station a small white dot with the ink outline (0.36 and 0.14 of
+  a stroke), no name. Muted with the rail lines while something else is picked; a click selects the line, a hover shows
+  its bullet and name.
+- **No rail near** (no stop within 0.05 degrees of any rail region's stations' box): those lines make a graph of their own
+  (`busGraph`: their stops the nodes, a station's one per complex; each hop's route kept to 15 m), split into regions as
+  rail is and laid out the same way, so they pull on their own layout; drawn as thin, their stops as the dots above, no
+  names; a stop that is no station is not picked, as on the map.
+
+**Mode buttons** (Anita, 2026-11-17: "toggle their visibility, as well as tram and train visibility ... with buttons on
+the top. can use icons"): one per kind of line the network has (trains, trams, buses, ferries; none when it has one
+kind, and a kind hidden in another game then counts for nothing), each pressed while shown, hovers "Show trains",
+"Show trams", "Show buses", "Show ferries"; kept per browser as `anitabuilder-diagram-modes`. A **line hidden on the map** (the Lines tab's hide mode, Settings' buses and ferries switch)
+is left out the same way (T-3785). Both act at paint time: the line is not drawn, nor the pills and names of stations
+whose every line stopping there is left out, and it cannot be picked; the layout keeps the room it had, so a toggle is
+instant.
+
+## Chosen cities
+
+`diagram/cut.ts`, `ui/DiagramButton.tsx` `CityChoice` (T-3409; Anita, 2026-11-19: "they should be redrawn so that they can
+get full precision as if they were the only things in the world. we shouldnt just take the world map and hide the stuff
+outside"). A button on the top row (the cities icon, hover "Choose cities", pressed while cities are chosen; shown when the
+game has stations or stops in two zones or more, or a choice; a thin divider before it when the mode buttons show, T-3825)
+opens a list under it: "All cities" first (the whole network, the default), then the regions (the realms the map shows
+and hides as one, `game/realms.ts`, by name; Anita, 2026-11-20), each with a chevron and a tick box: ticked when all its
+listed cities are chosen, a minus when some are, ticking it chooses them all and unticking clears them. Opened, a region
+lists its cities, each zone with a built station or a stop, by name, each with a tick box; a list of one region opens on
+it. Cities in no realm follow the regions, bare. A city is the zone a station is in (`stationZone`, as the Cities tab and
+fares by city). The choice is the game's, kept in the save's header (`schematic`, zone ids; absent for the whole network,
+so older saves open on it); Esc or a click outside closes the list. When the choice changes the camera fits the new
+drawing as it comes (with the spots below), unless the player pans or zooms meanwhile.
+
+- **Adding a neighbour** (T-3826; Anita, 2026-11-20: "i can select new york in the drop down, then just mouse over philly
+  and add it"). With cities chosen, each other city with a built station or stop within `REGION_JOIN_KM` (500 km) of a
+  drawn station has a spot beside the drawing: from the drawn station nearest it, the way the city lies on the ground
+  turned as the layout turns that region (a turn, scale and mirroring fitted over its stations), as far as the fit puts
+  it but no further than just past the drawn box (6% of its larger side plus 3 pitches), and clear of every drawn station
+  by that much. The pointer within 40 px of a spot, over nothing drawn, shows the realm buttons' circle there (16 px) and
+  the tag "Click to add Philadelphia"; a click adds the city. A tap with nothing shown first adds nothing. The spots are
+  never in the picture.
+
+- **Laid out alone.** The page tells the clock worker which stations and bus and ferry stops are in the chosen cities
+  (again when the network or the zones' outlines change); the clock worker cuts each line to its runs of two stops or
+  more inside them (`cutLines`), makes every station outside no station (so nothing passed or beside outside is drawn),
+  and builds the graphs from those runs and their own track alone: framed on that track, split into regions as ever.
+  So a city is drawn bit for bit as a network of only those lines would be (notes/T-3409.md). A run with one stop inside is left out; a line
+  whose stops cannot be found along its path is drawn only when all its stops are inside. If no run has two stops, the
+  whole network is drawn.
+- **Stubs.** Where a run's line goes on, it is drawn 3 pitches past its last station there (`stubEnd` in draw.ts),
+  straight on unless the line goes back the way it came (more than 100 degrees off), then the nearest of the eight ways
+  within a right angle. The stub is added before the pills, so that station's pill is one the line passes through; a
+  cut line beside an axis costs 1.05 times as much at that station, so the pill goes across it rather than along it when the two
+  tie. Buses and ferries drawn thin are cut the same way (`busRuns`), their stubs after the fit.
+- **The whole network kept.** While cities are chosen, the whole network's layout stays in hand, so going back to it
+  lays nothing out when the network has not changed. Clicks, hovers and the riders on a stretch count a run's stops from
+  its place in its line.
+- **The picture** follows the choice. **Share network** always sends the whole network: with cities chosen it asks the
+  clock worker for the whole network's graphs too and uses the layout kept, else lays it out (not shown).
+
 ## Zone borders
 
 `diagram/borders.ts` (T-2464; notes/T-2464.md). The borders are decided in the drawing, the way the Tube map draws
@@ -143,51 +231,9 @@ worker finds the sea on the ground (the coarse and far grids and the land masses
   one ending free within 1 km of the sea ends at it. Where a river meets the sea, its end takes the body nearest. A
   hop crosses a river where its track crosses the centre line an odd number of times; one hop crossing two arcs within
   600 m of each other (where rivers meet) crosses the wider only.
-- **Which rivers are drawn**: only rivers (water connected on the ground) some hop crosses, and each drawn **whole,
-  as one band**: its crossed arcs, the arcs joining them along it, the way from them to its nearest mouth, and the way
-  to each mouth at least 150 m wide each side of its middle within 25 km (so the East River runs from the harbour to
-  Long Island Sound). A river with no mouth runs on to its open end; one with neither (it stops on the ground at both
-  ends) is not drawn. A narrow arc at an end of what is drawn (all its crossings under 150 m each side) that crosses
-  another line is left out, and an arc left ending free with no crossing goes with it; a river narrow wherever it is
-  crossed is drawn only where it crosses no other line, else not at all. So **no band is drawn in pieces**.
-- **How wide** (T-2528): a band is the river's real width (its median along each arc) at the drawing's scale around it,
-  the scale field: at each place, the nearest 16 stations' own scales (their local maps', drawn over real), a geometric
-  mean weighted by exp(-d^2 / 2 R^2), R 1.5 km or the fourth nearest's distance, so it changes smoothly from place to
-  place. Smoothed along the river over 1.5 km either side, then at least half the river's widest drawn stretch times
-  their real widths' ratio (so a big river narrows gently downstream and a narrow branch stays narrow), between three
-  lines' width (3 x 5/6.4 of a pitch) and 18 pitches. So the Hudson and East River beside Manhattan, drawn large, are
-  wide, the Hudson up past Yonkers stays a band, and an outskirt river such as the Navesink stays near the least
-  width. Where the band would cover a pill, or a line running alongside it (within 30 degrees) that it does not cross,
-  it narrows to keep half a pitch off it. It is drawn as runs of one width, in quarter-pitch steps, so **every edge
-  of the water runs at 0, 45 or 90 degrees** (Anita, 2026-11-05): a run holds its width at least 4 pitches,
-  narrowing early to the least room ahead and widening only by half a pitch or more where that holds as long; a width
-  never changes at a bend, and where it changes the step is square (the runs cut square there), while a band's own
-  ends, and where rivers meet, are round.
-- **Rivers in the drawing**: bands with round ends. Each crossing is a straight
-  run square to the hop's bundle, at the real share of the hop (kept within 25 to 75%; moved to 20, 35, 50, 65 or 80%
-  where it would otherwise end on another line), from the side the river comes from on the ground, on past the
-  outermost casing by half a pitch; a run that crosses every line of another hop the river crosses serves for both.
-  Between crossings the band is routed on a one-pitch grid like a line (runs at 0, 45 and 90 degrees, a 45 degree bend
-  costing 10 pitches of length and a 90 degree one 30), dearer within a pitch of a casing, near the river's course
-  carried into the drawing through the nearest stations' local maps (T-2488's border lines), within 24 pitches of it.
-  It may cross other lines: each pitch inside a casing costs 10 pitches of length, inside a hop the river crosses
-  elsewhere 60, inside a pill 150, so it crosses a line where going around costs more (T-2516: a band that runs on
-  smoothly reads better than one winding through the gaps, and the drawing often puts a river's two banks on the wrong
-  sides of a line). Where that way crosses lines, the run is tried the other way around too, and the one crossing
-  fewer taken. So **a band crosses each hop that crosses that river once**, save where it has to cross its own hop
-  again, and other lines where the drawing leaves no way around.
-- **Ends**: a mouth goes into the drawn sea of the body it meets: to the nearest cell of that body's drawn sea, at
-  least a pitch past the band's edge from the coast, within 80 pitches of where its place on the ground is carried. A
-  mouth at a sea not drawn near (Newark Bay) goes on by water on the ground (the coarse grid's water, the shortest way
-  within 30 km) to a sea that is drawn, as its own band (the Kill Van Kull to the harbour); failing both, into whatever
-  drawn sea is nearest within those 80 pitches. An open end runs on
-  straight, away from the drawing's middle, to 12 pitches past the drawing's box. A free end (the river ends on the
-  ground) runs 3 pitches past its last crossing, a wide river's 5. A river whose mouths all find no drawn sea that way is
-  not drawn.
-- **Connected seas**: pieces of one body drawn apart (each 60 square pitches or more) and not joined by a drawn river
-  are joined by a channel band, the shortest way between them on the drawing's grid, routed like a river, where that
-  is within 40 pitches.
-- Corners are rounded at 2.5 pitches, unless that would cut across a line.
+- **Which rivers are drawn, and how**: on a city map the rubber sheet's Narrow rivers, below (T-3358): each river course
+  some hop crosses, routed after the layout as one band. On a map 600 km across or more, rivers are the map's own water,
+  read from the masks where the drawing shows the ground larger than its raster (The map, below; T-3839).
 - **The sea everywhere** (T-2540): past the coarse grid, a far grid (1 km a cell, coarser for a big network, at most
   1.5 million cells; 100 km past the coarse grid) holds the masks' water at least three of its cells wide; a place no
   mask covers takes the nearest known cell's (so open sea far from the stations is sea, and land between them land).
@@ -531,11 +577,17 @@ the sheet (a tenth), the lines and the carry (seven tenths) and the map.
   rebuild from the stations' sheet places, on the graph with those places (a pitch the sheet's pitch): each hop's target
   its length on the sheet (the dial at 0), no A and no blocks' stage, B holding each station to its sheet place at 2 (a
   rebuild's 0.05), and the separation keeping near the sheet's places. None of the layout's own water terms; instead
-  **water-gap pairs**: each station with its 6 nearest stations within 40 pitches on the sheet that are on another land
-  mass (the sheet's raster: its real place's, or the nearest land within 1 km) with water on the straight way between
-  them on the ground keeps at least 0.8 of their sheet gap along the sheet's direction between them, in B (weight 3) and
-  as a term of the separation. So rivers and straits between land masses stay open (the East River at the Brooklyn
-  Bridge). About 86% of New York's hops and 88% of all Japan's are drawn as one straight run.
+  **water-gap pairs**: each station (on land: its real place's, or the nearest land within 1 km) with its 6 nearest
+  stations within 40 pitches on the sheet with water on the straight way between them on the ground keeps at least 0.8
+  of their sheet gap along the sheet's direction between them, in B (weight 3) and as a term of the separation. So
+  rivers and straits stay open (the East River at the Brooklyn Bridge). Two stations on one land mass (the sheet's
+  raster) count where that water runs 100 m or more in one run and the sheet draws it 4 pitches wide or more (read from
+  the masks every 25 m on a map 600 km across or more, from the raster on a city map; T-3839): the masks' bridges join
+  a river's banks into one land mass, and a country's raster parts land only at the sea and wide straits, so the Thames
+  past Tilbury and the Hudson were squeezed shut. About 86% of New York's hops and 88% of all Japan's are drawn as one straight run. With the water on, a city map whose
+  routed rivers (Narrow rivers, below) leave stations on the wrong bank is laid out once more, those stations and their
+  neighbours on the lines ending the lines' pieces, so each hop there is straightened on its own (T-3358, Anita
+  2026-11-20: "yeah i like E"); a second layout leaving more stations on a wrong bank than the first is dropped.
 - **The carry**: a field of moves on the sheet's finest lattice, smooth by least squares, links on land stiff (5) and on
   water nearly free (0.004), met at each station (its place on its own land carried to its drawn place, weight 1). A
   station whose drawn place does not lie on its own land in the carried map is met 8 times harder, and the field solved
@@ -547,7 +599,11 @@ the sheet (a tenth), the lines and the carry (seven tenths) and the map.
   module that does not load) solves in JavaScript.
 - **The map**: a grid over the drawing (at most 4 million cells on a city map, 12 million on a country's) takes, cell by
   cell through the carried map's triangles, the ground under it: water, or the zone the land is in (the zones' outlines
-  the page sends). **Past the carried map's edge** (and where it reaches past the sheet's raster) nothing is known, so
+  the page sends). On a map 600 km across or more, where a cell covers less ground than a raster cell (a city drawn
+  large), the masks' own pixel under it decides water or land, and a land cell covering more than 75 m within two cells of
+  water reads four more pixels round its middle, water if any is; so a river or strait narrower than the raster's cell,
+  and one about a cell wide, is drawn (T-3839: on the whole North America save the raster's cell is 2.7 km, and the
+  Hudson came out as scattered blobs). **Past the carried map's edge** (and where it reaches past the sheet's raster) nothing is known, so
   with the water on each cell takes the nearest cell on the map (by chamfer distance), water only from a piece of water
   of at least 3,000 square pitches (the sea, a bay, a big lake), each edge cell taking the majority of the edge within
   12 pitches; then land so placed narrower than 5% of the grid's longer side, beside water so placed, is water. So a
@@ -557,27 +613,63 @@ the sheet (a tenth), the lines and the carry (seven tenths) and the map.
   another country's coast where its masks stop (Korea and China round all Japan), which would show as land ending in
   straight lines; land the masks hold whole stays, of any size and with or without a station (Pennsylvania past the
   Delaware, Sado, Kunashir, Governors Island). Each station's pill and 1.5 pitches around it (at least half a pitch more than a cell) are land of its
-  own zone; a station still off its own land has its land carried to it a pill wide, from at most 8 pitches. Cleaned (a
-  3 by 3 majority; water under 40 square pitches and land with no station under 30 dropped, before the bands below and
-  again after them).
+  own zone; a station still off its own land has its land carried to it a pill wide, from at most 8 pitches. Cleaned (water
+  meeting water only at a corner joined by a side; a 3 by 3 majority, which keeps a water cell joining water round it;
+  water under 40 square pitches and land with no station under 30 dropped, before the bands below and again after them).
+  **The water stays joined** (T-3839, `sheetThin.ts` `rejoinWater`): water as carried that the pills and the cleaning
+  took out where it joined two pieces of water (a pill's land across a narrow river, a thin piece's band falling short)
+  is joined again where the water within 12 pitches round the gap is in two pieces of 40 square pitches or more: the
+  cheapest way by sides through the gap (land round a pill 6 times dearer, never a pill or the water a routed river took
+  out), carved a pitch round. So a river reads as one water to its mouth (Newark Bay with the Passaic and the
+  Hackensack, the Harlem River into the East River).
 - **Narrow rivers** (with the water button on, on a city map; a map 600 km across or more draws only water wide enough
-  to show as area): every arc of a river some hop crosses, from the river finder of Water above run with a 25 m cell (so
-  the Harlem River is found whole), its middle carried through the map and moved so each crossing lies on its drawn hop
-  at the hop's share (the river within 3 km of a crossing moving with it), is a band 3.5 pitches wide where the grid's
-  water there is narrower. A band is pushed off stations nearer than half its width and a pill, narrowed (to 1.5 pitches
-  at least) where they leave no room, and stops either side of a station it still cannot pass, as at a bridge; its middle
-  is fitted with runs at 0, 45 and 90 degrees, straying up to 6 pitches but at least 1.5, less near a station, and split
-  round any station the fitted band would cover. A stub under twice its width crossing none of its hops is not drawn.
-  The grid's own water within a band's reach (and its river's carried middle's) that is narrower than the band becomes
-  land, so the band's are the only edges there. Bands are stroked one width each, round at their ends, corners rounded
-  at 2.5 pitches.
+  to show as area; `riverRoute.ts`, T-3358, notes/T-3358.md): the river finder's arcs (Water above, a 25 m cell) joined
+  into **courses**, the widest way at each junction. Each course some hop crosses is drawn after the layout as **one
+  band**, from 3 km before its first crossing to 3 km past its last, or on to its end where that meets the sea or
+  another river within 8 km. A course wider than 8 pitches at the drawing's scale is left to the map's own water (the
+  Hudson, the East River); a course no hop crosses is not drawn.
+  - **Width**: one per course, its stretch's typical real width (the median of its arcs' half widths by length) at the
+    drawing's scale at its crossings, at least three lines' width (2.34 pitches). Toward a sea end it steps up by powers
+    of 2 where an arc 500 m or longer is at least twice as wide, at most 12 pitches, never narrowing again (Anita,
+    2026-11-20: "leans to only widen toward the ocean"; Osaka's Yodo goes from 3.8 to 12 pitches).
+  - **Its way**: a path at 0, 45 and 90 degrees on a half-pitch grid, near the course carried into the drawing (each
+    crossing moved onto its hop as drawn, at the hop's share, the river within 3 km of it moving with it): free within 2
+    pitches of that middle, then ((d - 2) / 4)^2 a pitch, never past 15; a 45 degree bend costs 10 pitches of length
+    and a 90 degree one 30. Lines are a cost, never walls: 10 a pitch inside another hop's casing, 1 inside a hop the
+    river crosses on the ground, so it may run under a line between stations. **Banks**: the drawn straight way between
+    two stations within 2 km of each other that the river does not part on the ground (one within 1.5 km of it, the
+    other within 3 km) costs 3,000 a cell crossed, so every station near the river keeps its own bank. A station's
+    place grown by half the band and 0.2 is a wall (where no way round exists, 150 a pitch, like the rest of its pill).
+  - **Straightened lightly** (Anita, 2026-11-20: "straighten/smoothen ever so slightly even when space is tight"): the
+    path fitted again with runs at 0, 45 and 90 degrees straying up to 2 pitches, a way kept only where the area it
+    sweeps holds no station (so no station changes bank and no line is crossed a different number of times), comes no
+    nearer a station or its pill than half the band and 0.2 (or than the path did) and crosses no more lines. Hong
+    Kong's Tuen Mun River has 3 bends (22 before).
+  - **Ends**: an end at the sea or at another river goes into wider water (the map's, or a band routed before it:
+    courses go widest first, so a tributary meets its river), past the crossing nearest it; an end on land runs at
+    least 3 pitches past its last crossing. A band's two ends are round, and so is the wider run's end at a width
+    step; its middle's corners are circular arcs of 2.5 pitches, or half the band and a pitch more where that is larger,
+    so the inside of a bend is round too (T-3833). A band under 2 pitches long (its crossing already in wider water) is
+    not drawn.
+  - **Fillets** (T-3833; Anita, 2026-11-20: "it would be cool if we got the entire coastline, the entire surface
+    between land and water, to not have any perfect corners"): where a band's side or round end crosses the coast,
+    another band or its own other side, the corner of land between them is filled with water along an arc of 1.5
+    pitches touching both (less where either runs straight for less, or the arc would come within 0.75 of a station's
+    centre), drawn over the water as a patch reaching 0.04 of a pitch into it either side, so no seam shows
+    (`coastRound.ts` `bandFillets`).
+  - The map's own water along a routed course (out to 2.5 of its half width at the drawing's scale and a pitch and a
+    half) and within a band's reach becomes land where narrower than 8 pitches, so the band's edges are the only ones
+    there. **Every routed river is one piece** and leaves every station near it on its own bank but where the second
+    layout cannot (checks/t3358-river-banks.mjs: London's Thames from Battersea Park to Greenwich, the Harlem River,
+    Newtown Creek and the Tuen Mun River, 0 pairs wrong).
 - **Thin water and thin land as bands** (`sheetThin.ts`): water or land that a disc 8 pitches across (four cells on a
   coarse grid) does not fit is a thin piece (a strait, a creek, a spit, a pier, Bayonne's two peninsulas). Each piece is
   thinned to its middle lines (Zhang and Suen), spurs shorter than twice its width dropped, and each line drawn again as
   a band: its median width (at least 1.5 pitches, or a cell and a half), its middle fitted with runs at 0, 45 and 90
   degrees, straying up to 0.4 of the way to the next piece of its kind (at most 6 pitches, at least 0.85 of a cell), and
   on water clear of the pills. A band is never drawn within 1.7 cells of another piece of its kind outside its own
-  piece, so **no strait closes, no island joins another and no isthmus is cut**. Where a band meets the water or land it
+  piece, so **no strait closes, no island joins another and no isthmus is cut**; a piece whose bands leave the water
+  (or land) it joined in two pieces within its box and 8 pitches and two cells round is kept as it was (T-3839). Where a band meets the water or land it
   leaves from, the piece is kept as it was. A piece with a station on it, one at the map's edge and one under 3 pitches
   every way stay as they are. Two shores fitted apart could only follow a thin piece's own wiggles (Anita, 2026-11-06:
   "these peninsulas are very wiggly"); a band's edges are straight.
@@ -595,10 +687,16 @@ the sheet (a tenth), the lines and the carry (seven tenths) and the map.
   other zones' borders would be slivers), and only within 30 km (on the ground) of built track, so a zone is an open
   outline that shows where lines cross it or come near (T-2639). Where that would draw more than 50% of the borders of a
   zone a line passes through (coasts not counted), the zone's whole outline is drawn instead, so no small gap is left on
-  its far side. Any map, city or country. Corners
-  rounded at 3 pitches. **Every edge of the water runs at 0, 45 or 90
-  degrees, with no stair steps** (checks/t2580-sheet-water.mjs). The sea and rivers are drawn only with the water button
-  on; the borders always.
+  its far side. Any map, city or country. Border corners rounded at 3 pitches. **The coast's corners rounded, as far as
+  its runs allow** (T-3833, `coastRound.ts` `cleanRing`): first its small features go. A run under 3 pitches between two turns is taken
+  out (the runs either side run on to meet; at a step the shorter side moves onto the other's line; a nib or notch under
+  3 pitches deep, or under 1.2 wide and 8 deep, is cut off at its base), each move at most 3 pitches, never sweeping
+  over a station's centre or bringing the coast nearer one than 1.2 pitches (or than it already was); a ring left under
+  6 square pitches with no station near goes. Then each corner is a circular arc of up to 3 pitches (drawn as curves of
+  at most 45 degrees each, so a 135-degree tip is round too), a run too short for both its corners split between them
+  by what each asks, so both get the same radius. **Every edge of the water runs at 0, 45 or 90 degrees, with no stair
+  steps** (checks/t2580-sheet-water.mjs). The sea and rivers are drawn only with the water button on; the borders
+  always.
 - **City names** take the towns' places through the sheet.
 
 ## Regions

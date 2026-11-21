@@ -107,7 +107,11 @@ There is no built-in liking for the train. Rail and the car are compared on time
 Islands no road reaches (Sado, Salamis, Hong Kong's outlying islands, Liberty Island) have no car and no walk off
 them: the player's ferry or train is the only way. It takes every such trip unless it costs over 3
 times a drive over a bridge that isn't there, and none past 4 times. The rest are "no route":
-counted in the totals, by no mode. Car ferries don't count as roads.
+counted in the totals, by no mode. Car ferries don't count as roads. The same goes for longer trips
+and commutes between places on two landmasses with no flight between them (Vancouver to Victoria,
+Singapore to Batam, Tenerife to Gran Canaria), and between an island and the rest of its own place
+(Sado and Niigata, Okinawa's outer islands and Naha, Aegina and Athens). People on such an island
+only reach stations on it.
 
 ### By train
 
@@ -130,6 +134,8 @@ counted in the totals, by no mode. Car ferries don't count as roads.
 - Ride: 1 a minute, stretched once the train is 70% full: at 100% (160 a car) a minute counts 3,
   at 120% 5.4, at 150% (240 a car, as packed as a train gets) 10.8. Below 70% nobody minds the
   crowd.
+- Boarding: 2 minutes at the first train or tram of a trip, and 2 at the last one, at any station
+  (Anita, 2026-11-20). Nothing on a bus or ferry, or at a change (which has its own 2 below).
 - Changing trains: a fixed 2 minutes, plus the walk from the platform you arrive at to the one you
   leave from (centre to centre, at an easy walking pace, each minute counted 1.39), plus the wait
   for the next train. Platforms 80 m apart add 2 minutes; across one platform, nothing. Between
@@ -254,15 +260,20 @@ counted in the totals, by no mode. Car ferries don't count as roads.
 
 - 13 real minutes a km, every minute counted 1.5. So 1 km costs 19.5 minutes, 2 km 39, 3 km 58.5.
   Walks over 10 km are not offered.
-- Against the car, a walk gets a 10 minute head start: the car side leaves out getting to the car
-  and walking from the space, and this stands for them. It is one number for commutes and everyday
-  trips and for every country.
+- No head start: a walk, the train and the car meet on their minutes alone (Anita took the 10
+  minute head start away, 2026-11-20). The same for commutes and everyday trips and in every
+  country.
 - Worked through: a 10 minute walk (0.77 km) against a 1 km drive in a dense district. The walk
   counts 15. The drive is 3.6 minutes at 16.5 km/h, counted 1.33, so 4.8, plus 7 to park, plus 6
-  for the $2.00, plus 0.4 for the $0.13 a km: 18.2. The walk is 10 ahead, so the difference is
-  18.2 - 15 + 10 = 13 minutes, and 13 minutes is 79%. About 4 in 5 people walk, and 1 in 5 drive.
-  At 0.5 km about 84% walk, at 1 km 74%, at 2 km 44%, at 3 km 18%. (With no train, free parking.)
-  A train that is good for the trip takes its share from both.
+  for the $2.00, plus 0.4 for the $0.13 a km: 18.2. The difference is 18.2 - 15 = 3.2 minutes, and
+  3.2 minutes is 58%: a bit more than half walk. At 0.5 km about 67% walk, at 1 km 52%, at 2 km
+  23%, at 3 km 8%. (With no train, free parking.) A train that is good for the trip takes its share
+  from both.
+- A tenth of people won't walk the whole way past 800 m (the median walk; about 1 in 20 can't walk
+  far, the rest won't). On those trips they choose only between the train or bus and the car, and
+  the "no train slower than walking" rule doesn't apply to them, so a bus that is slower than
+  walking still gets a few of them: in a dense district with a bus every 10 minutes, about 1 in 15
+  trips of 1 km goes by bus, where nobody did before.
 - A commute's distance for walking is between actual homes and jobs (six of each per 2 km zone),
   not between zone centres, so a 1 km commute across a zone line walks like a 1 km one.
 
@@ -272,26 +283,29 @@ The walk to and from the station. A train that is fast still has to be reached: 
 end is 39 perceived minutes before the train has moved, more than most short drives cost. Where
 parking is paid, rail wins easily (Hempstead to Midtown). The trip explorer shows any trip's real minutes and its effective time (the perceived minutes above) by train, car and walking, each with its sum in a hover.
 
-The player's answer is a bus (since T-1464). Anyone within 300 m of a bus route walks to it (their
-distance to the route plus 100 m), waits and rides to a station at 90% of what a car does on the road there, never under 30 km/h while moving (a bus lane), losing 28 seconds at each stop: about 19 km/h with stops every 400 m in a dense centre like Manhattan. The change to the
-train is free: one fare for the whole trip on the same curve. Every time someone boards a bus,
-including changing from a train to one, it costs them 4 perceived minutes on top of the wait. A home
-1.5 km from a station walks 29 perceived minutes to it, or about 22 by bus. Trips by bus alone count
+The player's answer is a bus (since T-1464). Anyone within 600 m of a bus route (300 m before T-3856) walks to it (their
+distance to the route plus 100 m), waits and rides to a station at 85% of what a car does on the road there, never under 25 km/h while moving (a bus lane; 35 on a line upgraded to BRT), losing 28 seconds at each stop: about 17 km/h with stops every 400 m in a dense centre like Manhattan. The change to the
+train is free: one fare for the whole trip on the same curve, the bus kilometres' part above the base at 0.8
+times unless the player sets another Bus multiple. Boarding a bus costs only the wait, as boarding a train does
+(since T-3856; before, every bus boarding added 4 perceived minutes). A home
+1.5 km from a station walks 29 perceived minutes to it, or about 18 by bus. Trips by bus alone count
 as rail. A bus is a third of a train car: riders mind its crowding from 45 aboard, it is at 100% with 53
 and takes 80 at the most (a train car: 112, 160 and 240).
 
 A ferry line (since T-2195) is a line like any other: people walk to its ports as to stations, wait
 half its headway, ride at the boats' own speed, change to and from trains as anywhere, and pay the
-same fare curve, its part above the base times the Ferry multiple (1.00 unless the player sets it).
-There is no extra boarding cost as for a bus. A boat holds two cars' riders, 480 at the most. Where
+same fare curve, its part above the base times its boat size's ferry multiple (Small 1.50, Medium and Large
+1.00 unless the player sets them). There is no extra boarding cost, as for any line. A boat holds its size's riders:
+Small one car's (240 at the most), Medium two (480), Large eight (1,920); a Small boat runs at 65 km/h, the others 45. Where
 the ferry is the quickest way across (Staten Island to Manhattan) it wins on these rules alone, and
 its trips count as rail.
 
-Ferry fans (since T-2196): a tenth of the people making a visit or going to an attraction find
-ferries fun, so for them an hour aboard a ferry feels like 6 minutes. Everything else (the walk, the
-wait, the fare, changes, crowding) counts as for anyone, and they still pick between the network and
-the car as anyone does. Commutes, errands, school and the rest have no fans. Fans make no new trips:
-they only move leisure trips that already go between the places a ferry links.
+Ferry fans (since T-2196, wider since T-3892): 15% of the people on any everyday trip (errands, visits,
+school, university, attractions), and half as many on airport and medical trips and commutes, find ferries
+fun, so for them an hour aboard a ferry feels like 6 minutes. Everything else (the walk, the wait, the fare,
+changes, crowding) counts as for anyone, and they still pick between the network and the car as anyone does.
+Trips between zones have no fans. Fans make no new trips: they only move trips
+that already go between the places a ferry links.
 
 ## Anita's two tests
 

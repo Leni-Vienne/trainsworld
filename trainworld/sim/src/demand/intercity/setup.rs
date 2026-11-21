@@ -142,10 +142,10 @@ impl IntercityApi {
         let at = |z: usize| self.served_at.get(z).copied().unwrap_or(u32::MAX);
         let (i, k) = (at(a), at(b));
         let (za, zb) = (&m.zones[a], &m.zones[b]);
-        a != b && i != u32::MAX && k != u32::MAX && m.pr(za.place, zb.place).has_alt() && m.eachway(za, zb) >= m.rule.min_trips && self.served_comp[i as usize].iter().any(|c| self.served_comp[k as usize].binary_search(c).is_ok())
+        a != b && i != u32::MAX && k != u32::MAX && m.pr(za.place, zb.place).solved() && m.eachway(za, zb) >= m.rule.min_trips && self.served_comp[i as usize].iter().any(|c| self.served_comp[k as usize].binary_search(c).is_ok())
     }
-    /// The pairs between the `served` zones (ascending) joined by track, with a car or a plane to
-    /// compete with, in the whole market's order (T-174, T-409, T-377). `comp` is `served_comp`.
+    /// The pairs between the `served` zones (ascending) joined by track, in the whole market's order
+    /// (T-174, T-409, T-377). `comp` is `served_comp`.
     pub(super) fn set_served(&mut self, served: Vec<usize>, comp: Vec<Vec<u32>>) {
         let m = self.m.clone();
         // T-1735: with a window, only the pairs with an end in it
@@ -164,7 +164,7 @@ impl IntercityApi {
                 if any[(bit - 1) / 64] >> ((bit - 1) % 64) & 1 == 0 {
                     continue;
                 }
-                let (r, back) = (m.pr(za.place, zb.place), m.pr(zb.place, za.place));
+                let (r, back) = (m.zone_rule(za, zb), m.zone_rule(zb, za));
                 let trips = next.next().unwrap();
                 let d = m.zone_km(za, zb) as f32;
                 let corridor = m.open_corridor(za.place, zb.place) as u32;
@@ -193,12 +193,12 @@ impl IntercityApi {
             }
             let (zh, zw) = (&m.zones[h], &m.zones[w]);
             let km = m.zone_km(zh, zw) as f32;
-            let r = m.pr(zh.place, zw.place);
+            let r = m.zone_rule(zh, zw);
             let (rt, rk) = m.zone_ratios(&r, zh, zw);
             let car = drive_min(km) * rt * pc.w_drive + zw.park + pc.car_own_min() + km * ROAD_DETOUR * rk * pc.car_own_km_min() + r.cross.at(FARE_MIN_PER_USD);
             let corridor = m.open_corridor(zh.place, zw.place);
             let band = pc.band_of_d2(km * km * 1e6) as u8;
-            self.cpairs.push(CPair { c: c as u32, car, corridor, ride: km >= pc.ride_min_km, band });
+            self.cpairs.push(CPair { c: c as u32, car, corridor, ride: km >= pc.ride_min_km, band, apart: islands() && !r.car });
         }
         self.cpairs.shrink_to_fit();
         // T-1175: the everyday pairs, as the commutes
@@ -214,11 +214,11 @@ impl IntercityApi {
             }
             let (zh, za) = (&m.zones[h], &m.zones[a]);
             let km = m.zone_km(zh, za) as f32;
-            let r = m.pr(zh.place, za.place);
+            let r = m.zone_rule(zh, za);
             let (rt, rk) = m.zone_ratios(&r, zh, za);
             let car = drive_min(km) * rt * pc.w_drive + za.park + pc.car_own_min() + km * ROAD_DETOUR * rk * pc.car_own_km_min() + r.cross.at(FARE_MIN_PER_USD);
             let w = ep.walk.min(0.999);
-            self.epairs.push(EPairOn { e: e as u32, car, walk_e: w / (1. - w), ride: km >= pc.ride_min_km, band: pc.band_of_d2(km * km * 1e6) as u8 });
+            self.epairs.push(EPairOn { e: e as u32, car, walk_e: w / (1. - w), ride: km >= pc.ride_min_km, band: pc.band_of_d2(km * km * 1e6) as u8, apart: islands() && !r.car });
         }
         self.epairs.shrink_to_fit();
         self.served_at = at;
@@ -354,6 +354,10 @@ impl IntercityApi {
         let mut walks: Vec<(usize, f32)> = Vec::with_capacity(K);
         let comp = station_components(&build_graph(&net0, &self.base));
         let on_train = on_train(&net0);
+        // T-2216 stage 2: a zone's sites walk and ride only to stations on its land (`zone_land`; a
+        // station's is its nearest site's), as the local layer between land parts
+        let st_land = zone_lands_on().then(|| m.station_lands(&net0));
+        let (mut home_on, mut far_on): (Vec<Ride>, Vec<Ride>) = (vec![], vec![]);
         for g in &m.groups {
             // the stations in this group's frame
             let mut net = net0.clone();
@@ -387,13 +391,25 @@ impl IntercityApi {
                 let jw = g.city.jobs[c] / zz.w_attr.max(1e-12) as f32;
                 let cjw = ((g.city.jobs[c] - g.city.pop[c]) / 2.).max(0.) / zz.jobs.max(1e-12) as f32;
                 let kz = g.kz.cell_zone[c] as usize;
-                let home = &h_rides[h_off[kz] as usize..h_off[kz + 1] as usize];
-                let far = &f_rides[f_off[kz] as usize..f_off[kz + 1] as usize];
+                let mut home = &h_rides[h_off[kz] as usize..h_off[kz + 1] as usize];
+                let mut far = &f_rides[f_off[kz] as usize..f_off[kz + 1] as usize];
                 walks.clear();
                 for i in acc.of(c) {
                     let walk = acc.walk[i];
                     let cost = walk.min(self.base.walk_easy_min) * self.base.w_walk + (walk - self.base.walk_easy_min).max(0.) * self.base.w_walk_far;
                     walks.push((acc.st[i] as usize, cost));
+                }
+                if let Some(stl) = &st_land {
+                    let zl = m.zone_land(zz);
+                    let on = |st: usize| stl[st].is_none_or(|l| l == zl);
+                    if walks.iter().any(|w| !on(w.0)) || home.iter().chain(far).any(|r| !on(r.0 as usize)) {
+                        walks.retain(|w| on(w.0));
+                        home_on.clear();
+                        home_on.extend(home.iter().filter(|r| on(r.0 as usize)).cloned());
+                        far_on.clear();
+                        far_on.extend(far.iter().filter(|r| on(r.0 as usize)).cloned());
+                        (home, far) = (&home_on[..], &far_on[..]);
+                    }
                 }
                 add_access(&mut weights[z], &walks, home, theta, w);
                 add_access(&mut work[z], &walks, far, theta, jw);
@@ -536,6 +552,7 @@ impl IntercityApi {
         let Some((times, tph)) = per.filter(|_| st_xy.len() % 2 == 0 && stops.len() == *off.last().unwrap() as usize && cars.len() == line_n.len() && stops.iter().all(|&s| (s as usize) < st_xy.len() / 2)) else {
             return Err("intercity network arrays disagree".into());
         };
+        crate::demand::api::NetInputs { stations: st_xy.len() / 2, lines: line_n.len(), stops: stops.len(), complex: &self.complex_in, ups: &self.ups_in, bus_n: &self.bus_in.0, tram: &[], pier: &self.pier_in, back: &self.back_in, span: &self.span_in }.check()?;
         let (st_x, st_y, st_map) = merge_stations(st_xy, &off, stops, self.base.station_merge_m);
         let group = demand_groups(&st_map, st_x.len(), &self.complex_in);
         let ups = demand_ups(&st_map, st_x.len(), &self.ups_in);
@@ -545,6 +562,8 @@ impl IntercityApi {
             st_bus,
             st_tram: vec![],
             back: demand_back(&st_map, stops, &self.back_in),
+            pier: pier_lines(&self.pier_in.0, line_n.len()),
+            grade: pier_lines(&self.pier_in.1, stops.len()),
             st_x,
             st_y,
             st_map: st_map.clone(),

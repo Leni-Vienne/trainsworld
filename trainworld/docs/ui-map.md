@@ -48,8 +48,12 @@ default, draws a soft dot on each real station (`realMetro` purple, 36% opaque i
 a pale halo outside it, `realStationOpacity`; radius 3 px at zoom 10 to 8.5 at 18) on a canvas above the network,
 so over blueprints, built track and platforms and under the labels and stop marks, taking no clicks.
 Hovering a mark shows the station's name and nothing else (the name the
-station tool would give it, else the local name). A station whose every line is a tram, funicular, monorail or
-narrow gauge one shows only where those lines do: under All, or while tram track snaps. The stations are
+station tool would give it, else the local name); over a ring the name is the first row of the station tool's
+own tag, which holds the other hovers back (T-3802). A dot's name shows with no build tool, the Build tab's Select
+and the track tool, never where the player's network (track, station, line, train) is under the pointer, and a dot
+takes no clicks (T-3802). A dot on a station whose every line is a tram, funicular, monorail or
+narrow gauge one shows only where those lines do: under All, or while tram track snaps. As rings, tram stops (every
+line a tram or the like, one a tram) show always, at 0.65 of a station's ring (T-3802). The stations are
 noritetsu's model's (`data/<cc>/stations.json`, junction points left out; the tram test reads the region's
 `lines.json`), fetched per region when the view at zoom 10 or closer first touches it with the setting on.
 Snapping is unchanged.
@@ -445,7 +449,8 @@ has no hover of its own; the track tool's tag names the class and its factor [T-
 ## Bus lines
 
 A bus line (T-1464) is drawn by its own pass under rail track: 0.45 of a rail line's width in its
-colour on a casing (white in light, dark in the dark theme), a planned one as rail blueprints are.
+colour on a casing (white in light, dark in the dark theme), a planned one as rail blueprints are; a BRT line
+(T-3907) 1.4 times as wide along its whole route (`BRT_WIDTH`), except in the Traffic view, where width is riders.
 In the Traffic view a running bus or ferry line is drawn as wide as a rail line with as many riders,
 stretch by stretch between the stops demand counts (a ferry's ports), on the rail lines' scale
 (`demandLayers.ts` `busWidths`, T-2274).
@@ -454,8 +459,14 @@ station is drawn like any other, ring or end square, on the route where it passe
 the station's centre (T-2982), in a pass after the stations so it reads over the station's mark where the two
 meet (`BusLayer.drawStationStops`, T-2948). From zoom 13 a thin dashed line runs from such a stop to its
 station (1.5 px, the map's ink at 50%, the transfer; `FLAG_TRANSFER`), drawn under the track and never
-picked; the same line joins two bus lines' stops within 100 m of each other, one place for demand (T-2992,
-`game/busLinks.ts`; none between two on one spot). A bus or ferry loop run one way has small arrowheads in its colour from zoom 13, pointing the way
+picked, and the same from a plain stop to another line's stop at a station within 100 m (T-2992). Two plain
+stops that connect but are drawn apart get a **connector** from zoom 13, made like the connector between a
+station complex's dots (T-3890, `FLAG_LINK`, `busPlaces` in `game/busLinks.ts`): white, the stations' rim
+along both sides (blue as a blueprint station's while either line is planned), its white 0.75 of a stop
+ring's inner radius each side, over the routes and under the stops, never picked. One joins two lines' stops
+within 100 m of each other, one place for demand, by the shortest joins of the place (none between two on
+one spot); one joins two places within 300 m of each other, the change walk, from their nearest stops, where
+either has a line the other has not and no bus line stops at both (its route joins them already). A bus or ferry loop run one way has small arrowheads in its colour from zoom 13, pointing the way
 its vehicles go and sticking out both sides of the route, twice as wide as they are long (their casing only
 off the route), none in the Speed and Profit displays (T-2991, `oneWayMarks.ts`). Its street rings are half filled, the half on the right of the way the buses go, where the sim serves the stop one way (`line_stop_ways`, T-3147), and the bus stop hover has the line's chevron after its bullet. In stop editing, the hover over a stop served one way has "One way stop" above "Click to remove the stop" (T-3211). A train loop run one way
 has a tiny white chevron on the line instead, on the edges its path runs once (a balloon's tail runs both
@@ -469,10 +480,13 @@ the riders on the stretch between the stops under the pointer (a ferry's between
 "Fastest bus 16 km/h" ("Fastest boat" on a ferry) on its colour, or "No buses run here" ("No boats"), and in
 Profit before the riders the track's money rows for that stretch with "Running buses" ("Running boats") in
 place of "Running trains", or "No buses run here" while none run [T-2452]; "Bus stop" or "End of the
-line" on a stop. A click selects the line; rail wins where both are under the pointer. A click on a stop where
-two or more bus lines have a stop (marks drawn on top of each other) selects the stop instead (T-2949): its
-panel names it (the nearest station's, else "Bus stop") and lists the lines that stop there, a click on one
-selecting that line; the map draws nothing selected. A bus is one
+line" on a stop, then its line and the other bus lines stopping at its place (the resting list then leaves
+those lines out); on a train station's stop, the station's tag. Hovering a stop demand sees lights
+its place's stop marks (their rim mixed 30% toward white, as a hovered line) and connectors (their rim 60%, as
+a hovered station's); a street stop lights its line. A click on the route selects the line; rail wins where
+both are under the pointer. A click on a stop demand sees selects the stop and opens its panel (T-3890,
+[ui-inspectors.md](ui-inspectors.md) "The bus line panel"), on a train station's stop the station; the
+selected stop's place stays lit; a street stop selects its line. A bus is one
 short narrow car, one rigid straight body that points along the route (never bending or turning sideways in a corner), drawn at its minimum screen size from a distance (0.45 of a train's length and 0.69 of its width, T-2957) and 1.2 times
 its real size close up, and standing at every stop, street stops included (T-1798). A bus line's badge is a rounded square everywhere (corner 18% of its side, the
 map's end squares too), a rail line's a circle, unless the player picks another shape for the line or its mode

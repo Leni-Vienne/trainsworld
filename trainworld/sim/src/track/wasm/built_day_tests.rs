@@ -15,7 +15,7 @@ fn joint(a: &mut TrackApi, x: f64) -> u32 {
 }
 
 fn piece(a: u32, b: u32, built: bool) -> EdgeData {
-    EdgeData { a, b, tracks: 2, pis: vec![], built, off: false, thru: vec![], crossover: false, kind: TrackKind::Regular, sep: false, day: 0, oneway: 0, join: [0; 2], limit: 0 }
+    EdgeData { a, b, tracks: 2, pis: vec![], built, off: false, thru: vec![], crossover: false, kind: TrackKind::Regular, sep: false, day: 0, oneway: 0, join: [0; 2], limit: 0, ramp: 0 }
 }
 
 fn built_edge(a: &mut TrackApi, from: u32, to: u32) -> u32 {
@@ -29,7 +29,7 @@ fn station(name: &str, built: bool) -> StationData {
 }
 
 fn plain_line(stops: Vec<u32>, path: Vec<u32>) -> LineData {
-    LineData { rows: 0, x: Default::default(), name: "L".into(), symbol: String::new(), colour: 0, stops, path, tph: [0.0; 3], trains: Some([0; 3]), auto: None, dwell_s: 30.0, turnaround_s: 120.0, cars: 0, fast: false, bus: None, ferry: None, group: 0, group_name: String::new(), group_look: Default::default(), day: 0, hand: false, one_way: false, limit: 0, twin: Default::default(), weekend: Default::default(), ones: vec![], fare_dist: false }
+    LineData { rows: 0, x: Default::default(), name: "L".into(), symbol: String::new(), colour: 0, stops, path, tph: [0.0; 3], trains: Some([0; 3]), auto: None, dwell_s: 30.0, turnaround_s: 120.0, cars: 0, fast: false, bus: None, ferry: None, group: 0, group_name: String::new(), group_look: Default::default(), outer: vec![], day: 0, hand: false, one_way: false, limit: 0, twin: Default::default(), weekend: Default::default(), ones: vec![], fare_dist: false }
 }
 
 /// Two built stations, an edge between them and a line over it, all built on day 5.
