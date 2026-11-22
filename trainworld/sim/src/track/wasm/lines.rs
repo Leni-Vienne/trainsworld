@@ -459,7 +459,7 @@ impl TrackApi {
         let old = net.line_path(line);
         let old_turns = turn_nodes(net, old);
         let reach = reachable_from(net, stops);
-        let mut memo = HopMemo::new();
+        let mut memo = HopMemo::for_stop_scan(net, stops);
         let turn_at: Vec<u32> = turns(net, line, &mut memo).into_iter().map(|t| t.branch).collect();
         let unturn_at = unturn_branch(net, line, &mut memo);
         let mut out = vec![];
@@ -484,6 +484,7 @@ impl TrackApi {
             } else if !stops.is_empty() && !reach[n as usize] {
                 (3.0, -1.0)
             } else {
+                memo.try_station(n);
                 match best_insert(net, line, n, &mut memo) {
                     None if self.train_kept_off(stops, n) => (9.0, -1.0),
                     None => (3.0, -1.0),

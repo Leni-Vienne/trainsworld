@@ -957,3 +957,5 @@ mod derive;
 mod validate;
 mod costs;
 mod paths;
+#[cfg(feature = "track-api")]
+pub(crate) use paths::PathTree;
